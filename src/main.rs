@@ -1,1040 +1,662 @@
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::sync::mpsc::{Receiver, Sender, SendError, self};
-use rayon::prelude::*;
+#![feature(generic_const_exprs)]
 
-trait Component {
-    fn recv(&mut self);
-    fn send(&self) -> Result<(), SendError<bool>>;
-    fn fast_send(&mut self) -> Result<(), SendError<bool>> {
-        self.send()
-    }
-    fn step(&mut self) -> Result<(), SendError<bool>> {
-        self.recv();
-        self.send()
-    }
-    fn needed_step(&self) -> usize {
-        1
-    }
-}
-#[derive(Debug)]
-struct And {
-    cache: bool,
-    input1: Receiver<bool>,
-    input2: Receiver<bool>,
-    output: Sender<bool>,
-}
+// use std::sync::mpsc::{Receiver, Sender, SendError, self};
+// use rayon::prelude::*;
 
-impl Component for And {
-    fn recv(&mut self) {
-        let input1 = self.input1.recv().unwrap_or(false);
-        let input2 = self.input2.recv().unwrap_or(false);
-        self.cache = input1 && input2;
-    }
-    fn send(&self) -> Result<(), SendError<bool>> {
-        self.output.send(self.cache)
-    }
-}
-impl And {
-    fn new(
-        input1: Receiver<bool>,
-        input2: Receiver<bool>,
-        output: Sender<bool>,
-    ) -> Self {
-        Self {cache: false, input1, input2, output}
-    }
-    fn create(input1: Receiver<bool>, input2: Receiver<bool>) -> (Self, Receiver<bool>) {
-        let (s, r) = mpsc::channel();
-        (Self::new(input1, input2, s), r)
+trait Component<const I: usize, const O: usize> {
+    fn eval(&self, input: [bool; I]) -> [bool; O];
+    fn eval_recur(&mut self, input: [bool; I]) -> [bool; O] {
+        self.eval(input)
     }
 }
 
-#[derive(Debug)]
-struct AndN {
-    cache: bool,
-    input: Vec<Receiver<bool>>,
-    output: Sender<bool>,
+struct MergeLayers<const I: usize, const M: usize, const O: usize> {
+    layer1: Box<dyn Component<I, M>>,
+    layer2: Box<dyn Component<M, O>>,
 }
-impl Component for AndN {
-    fn recv(&mut self) {
-        // allは短絡評価なので注意
-        // 正格評価にする
-        self.cache = self.input.iter()
-            .map(|input| input.recv().unwrap_or(false))
-            .collect::<Vec<bool>>().into_iter()
-            .all(|b| b);
+impl<const I: usize, const M: usize, const O: usize> Component<I, O> for MergeLayers<I, M, O> {
+    fn eval(&self, input: [bool; I]) -> [bool; O] {
+        self.layer2.eval(self.layer1.eval(input))
     }
-    fn send(&self) -> Result<(), SendError<bool>> {
-        self.output.send(self.cache)
+    fn eval_recur(&mut self, input: [bool; I]) -> [bool; O] {
+        self.layer2.eval_recur(self.layer1.eval_recur(input))
     }
 }
-impl AndN {
-    fn new(input: Vec<Receiver<bool>>, output: Sender<bool>) -> Self {
-        Self {cache: false, input, output}
+impl<const I: usize, const M: usize, const O: usize> MergeLayers<I, M, O> {
+    fn create(layer1: Box<dyn Component<I, M>>, layer2: Box<dyn Component<M, O>>) -> Self {
+        Self { layer1, layer2 }
     }
-    fn create(input: Vec<Receiver<bool>>) -> (Self, Receiver<bool>) {
-        let (s, r) = mpsc::channel();
-        (Self::new(input, s), r)
+    fn connect_to<const P: usize>(
+        self,
+        next_layer: Box<dyn Component<O, P>>,
+    ) -> MergeLayers<I, O, P> {
+        MergeLayers::create(Box::new(self), next_layer)
     }
 }
 
-#[derive(Debug)]
-struct Or {
-    cache: bool,
-    input1: Receiver<bool>,
-    input2: Receiver<bool>,
-    output: Sender<bool>,
+struct ConcatBlocks<const I: usize, const O: usize, const N: usize> {
+    blocks: [Box<dyn Component<I, O>>; N],
 }
 
-impl Component for Or {
-    fn recv(&mut self) {
-        let input1 = self.input1.recv().unwrap_or(false);
-        let input2 = self.input2.recv().unwrap_or(false);
-        self.cache = input1 || input2;
-    }
-    fn send(&self) -> Result<(), SendError<bool>> {
-        self.output.send(self.cache)
-    }
-}
-impl Or {
-    fn new(
-        input1: Receiver<bool>,
-        input2: Receiver<bool>,
-        output: Sender<bool>,
-    ) -> Self {
-        Self {cache: false, input1, input2, output}
-    }
-    fn create(
-        input1: Receiver<bool>,
-        input2: Receiver<bool>,
-    ) -> (Self, Receiver<bool>) {
-        let (s, r) = mpsc::channel();
-        (Self::new(input1, input2, s), r)
-    }
-}
-
-#[derive(Debug)]
-struct OrN {
-    cache: bool,
-    input: Vec<Receiver<bool>>,
-    output: Sender<bool>,
-}
-
-impl Component for OrN {
-    fn recv(&mut self) {
-        self.cache = self.input.iter()
-            .map(|r| r.recv().unwrap_or(false))
-            .collect::<Vec<_>>()
-            .iter()
-            .any(|&b| b);
-    }
-    fn send(&self) -> Result<(), SendError<bool>> {
-        self.output.send(self.cache)
-    }
-}
-impl OrN {
-    fn new(
-        input: Vec<Receiver<bool>>,
-        output: Sender<bool>,
-    ) -> Self {
-        Self {cache: false, input, output}
-    }
-    fn create(
-        input: Vec<Receiver<bool>>,
-    ) -> (Self, Receiver<bool>) {
-        let (s, r) = mpsc::channel();
-        (Self::new(input, s), r)
-    }
-}
-
-#[derive(Debug)]
-struct Not {
-    cache: bool,
-    input: Receiver<bool>,
-    output: Sender<bool>,
-}
-
-impl Component for Not {
-    fn recv(&mut self) {
-        let input = self.input.recv().unwrap_or(false);
-        self.cache = !input;
-    }
-    fn send(&self) -> Result<(), SendError<bool>> {
-        self.output.send(self.cache)
-    }
-}
-
-impl Not {
-    fn new(
-        input: Receiver<bool>,
-        output: Sender<bool>,
-    ) -> Self {
-        Self {cache: false, input, output}
-    }
-    fn create(input: Receiver<bool>) -> (Self, Receiver<bool>) {
-        let (s, r) = mpsc::channel();
-        (Self::new(input, s), r)
-    }
-}
-
-#[derive(Debug)]
-struct Branch {
-    cache: bool,
-    input: Receiver<bool>,
-    output1: Sender<bool>,
-    output2: Sender<bool>,
-}
-
-impl Component for Branch {
-    fn recv(&mut self) {
-        let input = self.input.recv().unwrap_or(false);
-        self.cache = input;
-    }
-    fn send(&self) -> Result<(), SendError<bool>> {
-        self.output1.send(self.cache)?;
-        self.output2.send(self.cache)
-    }
-}
-
-impl Branch {
-    fn new(
-        input: Receiver<bool>,
-        output1: Sender<bool>,
-        output2: Sender<bool>,
-    ) -> Self {
-        Self {cache: false, input, output1, output2}
-    }
-    fn create(input: Receiver<bool>) -> (Self, (Receiver<bool>, Receiver<bool>)) {
-        let (output1_s, output1_r) = mpsc::channel();
-        let (output2_s, output2_r) = mpsc::channel();
-        (
-            Self {cache: false, input, output1: output1_s, output2: output2_s},
-            (output1_r, output2_r)
-        )
-    }
-}
-
-#[derive(Debug)]
-struct BranchN {
-    cache: bool,
-    input: Receiver<bool>,
-    output: Vec<Sender<bool>>,
-}
-
-impl Component for BranchN {
-    fn recv(&mut self) {
-        let input = self.input.recv().unwrap_or(false);
-        self.cache = input;
-    }
-    fn send(&self) -> Result<(), SendError<bool>> {
-        for output in self.output.iter() {
-            output.send(self.cache)?;
+impl<const I: usize, const O: usize, const N: usize> Component<{ I * N }, { O * N }>
+    for ConcatBlocks<I, O, N>
+where
+    [(); I * N]: Sized,
+    [(); O * N]: Sized,
+{
+    fn eval(&self, input: [bool; I * N]) -> [bool; O * N] {
+        let inputs = Self::split_input(input);
+        let mut outputs = [[false; O]; N];
+        for ((result, block), val) in outputs.iter_mut().zip(self.blocks.iter()).zip(inputs) {
+            result
+                .iter_mut()
+                .zip(block.eval(val))
+                .map(|(v1, v2)| *v1 = v2);
         }
-        Ok(())
+        Self::merge_output(outputs)
     }
 }
-impl BranchN {
-    fn new(input: Receiver<bool>, output: Vec<Sender<bool>>) -> Self {
-        Self {input, output, cache: false}
+impl<const I: usize, const O: usize, const N: usize> ConcatBlocks<I, O, N> {
+    fn create(blocks: [Box<dyn Component<I, O>>; N]) -> Self {
+        Self { blocks }
     }
-    fn create(input_r: Receiver<bool>, n: u32) -> (Self, Vec<Receiver<bool>>) {
-        let (output_s, output_r): (Vec<_>, Vec<_>) = (0..n).map(|_| mpsc::channel()).unzip();
-        let branch = Self::new(input_r, output_s);
-        (branch, output_r)
+    fn split_input(input: [bool; I * N]) -> [[bool; I]; N] {
+        let mut inputs = [[false; I]; N];
+        for (v1, v2) in inputs.iter_mut().flatten().zip(input) {
+            *v1 = v2;
+        }
+        return inputs;
     }
-}
-
-struct NAND {
-    and: And,
-    not: Not,
-}
-impl Component for NAND {
-    fn recv(&mut self) {
-        self.and.recv();
-        self.not.recv();
-    }
-    fn send(&self) -> Result<(), SendError<bool>> {
-        self.not.send()?;
-        self.and.send()
-    }
-    fn needed_step(&self) -> usize {
-        2
+    fn merge_output(outputs: [[bool; O]; N]) -> [bool; O * N] {
+        let mut output = [false; O * N];
+        for (v1, v2) in outputs.into_iter().flatten().zip(output.iter_mut()) {
+            *v2 = v1;
+        }
+        return output;
     }
 }
 
-impl NAND {
-    fn new(input1: Receiver<bool>, input2: Receiver<bool>, output: Sender<bool>) -> Self {
-        let (s, r) = mpsc::channel();
-        let and = And::new(input1, input2, s);
-        let not = Not::new(r, output);
-        NAND {and, not}
+struct ConcatDifferentShapeBlocks<
+    const I1: usize,
+    const I2: usize,
+    const O1: usize,
+    const O2: usize,
+> {
+    block1: Box<dyn Component<I1, O1>>,
+    block2: Box<dyn Component<I2, O2>>,
+}
+
+impl<const I1: usize, const I2: usize, const O1: usize, const O2: usize>
+    Component<{ I1 + I2 }, { O1 + O2 }> for ConcatDifferentShapeBlocks<I1, I2, O1, O2>
+{
+    fn eval(&self, input: [bool; I1 + I2]) -> [bool; O1 + O2] {
+        let (input1, input2) = Self::split_input(input);
+        let output1 = self.block1.eval(input1);
+        let output2 = self.block2.eval(input2);
+        Self::merge_output(output1, output2)
+    }
+    fn eval_recur(&mut self, input: [bool; I1 + I2]) -> [bool; O1 + O2] {
+        let (input1, input2) = Self::split_input(input);
+        let output1 = self.block1.eval_recur(input1);
+        let output2 = self.block2.eval_recur(input2);
+        Self::merge_output(output1, output2)
+    }
+}
+impl<const I1: usize, const I2: usize, const O1: usize, const O2: usize>
+    ConcatDifferentShapeBlocks<I1, I2, O1, O2>
+{
+    fn create(block1: Box<dyn Component<I1, O1>>, block2: Box<dyn Component<I2, O2>>) -> Self {
+        Self { block1, block2 }
+    }
+    fn split_input(input: [bool; I1 + I2]) -> ([bool; I1], [bool; I2]) {
+        let mut input1 = [false; I1];
+        let mut input2 = [false; I2];
+        for (v1, v2) in input1.iter_mut().chain(input2.iter_mut()).zip(input) {
+            *v1 = v2;
+        }
+        return (input1, input2);
+    }
+    fn merge_output(output1: [bool; O1], output2: [bool; O2]) -> [bool; O1 + O2] {
+        let mut output = [false; O1 + O2];
+        let output_chain = output1.into_iter().chain(output2);
+        for (v1, v2) in output1.into_iter().chain(output2).zip(output.iter_mut()) {
+            *v2 = v1;
+        }
+        return output;
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct False<const I: usize, const O: usize> {}
+impl<const I: usize, const O: usize> Component<I, O> for False<I, O> {
+    fn eval(&self, input: [bool; I]) -> [bool; O] {
+        [false; O]
+    }
+}
+impl<const I: usize, const O: usize> False<I, O> {
+    fn new() -> Self {
+        Self {}
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct And<const I: usize> {}
+impl<const I: usize> Component<I, 1> for And<I> {
+    fn eval(&self, input: [bool; I]) -> [bool; 1] {
+        [input.into_iter().all(|b| b)]
+    }
+}
+impl<const I: usize> And<I> {
+    fn new() -> Self {
+        Self {}
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Or<const I: usize> {}
+
+impl<const I: usize> Component<I, 1> for Or<I> {
+    fn eval(&self, input: [bool; I]) -> [bool; 1] {
+        [input.into_iter().any(|b| b)]
+    }
+}
+impl<const I: usize> Or<I> {
+    fn new() -> Self {
+        Self {}
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Not {}
+
+impl Component<1, 1> for Not {
+    fn eval(&self, input: [bool; 1]) -> [bool; 1] {
+        [!input[0]]
+    }
+}
+impl Not {
+    fn new() -> Self {
+        Self {}
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Buffer {}
+
+impl Component<1, 1> for Buffer {
+    fn eval(&self, input: [bool; 1]) -> [bool; 1] {
+        [input[0]]
+    }
+}
+impl Buffer {
+    fn new() -> Self {
+        Self {}
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Branch<const O: usize> {}
+
+impl<const O: usize> Component<1, O> for Branch<O> {
+    fn eval(&self, input: [bool; 1]) -> [bool; O] {
+        [input[0]; O]
+    }
+}
+impl<const O: usize> Branch<O> {
+    fn new() -> Self {
+        Self {}
+    }
+}
+
+struct NAND<const I: usize> {
+    nand: MergeLayers<I, 1, 1>,
+}
+impl<const I: usize> Component<I, 1> for NAND<I> {
+    fn eval(&self, input: [bool; I]) -> [bool; 1] {
+        self.nand.eval(input)
+    }
+}
+impl<const I: usize> NAND<I> {
+    fn new() -> Self {
+        Self {
+            nand: MergeLayers::create(Box::new(And::<I>::new()), Box::new(Not::new())),
+        }
     }
 }
 
 struct RSFlipFlop {
-    nand1: NAND,
-    nand2: NAND,
-    not1: Not,
-    not2: Not,
-    branch1: Branch,
-    branch2: Branch,
+    ff: MergeLayers<4, 4, 2>,
+    nand1_to_nand2_line_state: bool,
+    nand2_to_rand1_line_state: bool,
 }
 
-impl Component for RSFlipFlop {
-    fn recv(&mut self) {
-        self.nand1.recv();
-        self.nand2.recv();
-        self.not1.recv();
-        self.not2.recv();
-        self.branch1.recv();
-        self.branch2.recv();
+impl Component<2, 2> for RSFlipFlop {
+    fn eval(&self, input: [bool; 2]) -> [bool; 2] {
+        self.ff.eval(self.input_with_cache(input))
     }
-    fn send(&self) -> Result<(), SendError<bool>> {
-        self.nand1.send()?;
-        self.nand2.send()?;
-        self.not1.send()?;
-        self.not2.send()?;
-        self.branch1.send()?;
-        self.branch2.send()
-    }
-    fn needed_step(&self) -> usize {
-        2 * self.nand1.needed_step()
-            + 2 * self.not1.needed_step()
-            + 2 * self.branch1.needed_step()
+    fn eval_recur(&mut self, input: [bool; 2]) -> [bool; 2] {
+        let result = self.ff.eval_recur(self.input_with_cache(input));
+        self.nand1_to_nand2_line_state = result[0];
+        self.nand2_to_rand1_line_state = result[1];
+        result
     }
 }
 
 impl RSFlipFlop {
-    fn new(
-        input_r: Receiver<bool>,
-        input_s: Receiver<bool>,
-        output_q: Sender<bool>,
-        output_nq: Sender<bool>
-    ) -> Self {
-        let (n1_nand1_s, n1_nand1_r) = mpsc::channel();
-        let (n2_nand2_s, n2_nand2_r) = mpsc::channel();
-        let (nand1_branch1_s, nand1_branch1_r) = mpsc::channel();
-        let (branch1_nand2_s, branch1_nand2_r) = mpsc::channel();
-        let (nand2_branch2_s, nand2_branch2_r) = mpsc::channel();
-        let (branch2_nand1_s, branch2_nand1_r) = mpsc::channel();
-        let not1 = Not::new(input_s, n1_nand1_s);
-        let not2 = Not::new(input_r, n2_nand2_s);
-        let nand1 = NAND::new(n1_nand1_r, branch2_nand1_r, nand1_branch1_s);
-        let nand2 = NAND::new(n2_nand2_r, branch1_nand2_r, nand2_branch2_s);
-        let branch1 = Branch::new(nand1_branch1_r, output_q, branch1_nand2_s);
-        let branch2 = Branch::new(nand2_branch2_r, output_nq, branch2_nand1_s);
-        RSFlipFlop { nand1, nand2, not1, not2, branch1, branch2}
+    fn new() -> Self {
+        let layer1 = ConcatBlocks::create([
+            Box::new(Not::new()),
+            Box::new(Buffer::new()),
+            Box::new(Buffer::new()),
+            Box::new(Not::new()),
+        ]);
+        let layer2 = ConcatBlocks::create([Box::new(And::<2>::new()), Box::new(And::<2>::new())]);
+        let ff = MergeLayers::<4, 4, 2>::create(Box::new(layer1), Box::new(layer2));
+        Self {
+            ff,
+            nand2_to_rand1_line_state: false,
+            nand1_to_nand2_line_state: false,
+        }
     }
-    fn create(
-        reset: Receiver<bool>,
-        set: Receiver<bool>
-    ) -> (Self, Receiver<bool>, Receiver<bool>) {
-        let (q_s, q_r) = mpsc::channel();
-        let (nq_s, nq_r) = mpsc::channel();
-        let ff = Self::new(reset, set, q_s, nq_s);
-        (ff, q_r, nq_r)
-    }
-    fn debug() -> Computer {
-        let (s_s, s_r) = mpsc::channel();
-        let (r_s, r_r) = mpsc::channel();
-        let (q_s, q_r) = mpsc::channel();
-        let (nq_s, nq_r) = mpsc::channel();
-        let flipflop = Self::new(s_r, r_r, q_s, nq_s);
-        let block = Block {comps: vec![Box::new(flipflop)]};
-        let input = vec![s_s, r_s];
-        let output = vec![q_r, nq_r];
-        Computer {input, output, block, input_cache: vec![false, false]}
+    fn input_with_cache(&self, input: [bool; 2]) -> [bool; 4] {
+        [
+            input[0],
+            self.nand2_to_rand1_line_state,
+            self.nand1_to_nand2_line_state,
+            input[1],
+        ]
     }
 }
 
-struct BitDecoder {
-    not: Vec<Not>,
-    branch: Vec<BranchN>,
-    and: Vec<AndN>,
+struct Wiring<const N: usize, const M: usize> {
+    table: [usize; M],
 }
-
-impl Component for BitDecoder {
-    fn recv(&mut self) {
-        self.not.par_iter_mut().for_each(|not| {
-            not.recv();
-        });
-        self.branch.par_iter_mut().for_each(|branch| {
-            branch.recv();
-        });
-        self.and.par_iter_mut().for_each(|and| {
-            and.recv();
-        });
-    }
-    fn send(&self) -> Result<(), SendError<bool>> {
-        self.iter().into_iter().map(|c| c.send().map(|_| 0))
-            .sum::<Result<i32, _>>()
-            .map(|_| ())
-    }
-    fn needed_step(&self) -> usize {
-        let margin = 2;
-        2 * self.branch.get(0).map(|b| b.needed_step()).unwrap_or(1)
-            + self.not.get(0).map(|n| n.needed_step()).unwrap_or(1)
-            + self.and.get(0).map(|a| a.needed_step()).unwrap_or(1)
-            + margin
+impl<const N: usize, const M: usize> Component<N, M> for Wiring<N, M> {
+    fn eval(&self, input: [bool; N]) -> [bool; M] {
+        let mut output = [false; M];
+        for (v, i) in output.iter_mut().zip(self.table) {
+            *v = input[i];
+        }
+        return output;
     }
 }
-
-impl BitDecoder {
-    fn create(input_r: Vec<Receiver<bool>>) -> (Self, Vec<Receiver<bool>>) {
-        let bit = input_r.len() as u32;
-        let masks: Vec<(usize, usize)> = (0..bit as usize).map(|i| (i, 1 << i)).collect();
-
-        let (top_branch, top_input): (Vec<_>, Vec<Vec<_>>) = input_r.into_iter()
-            .map(|input| BranchN::create(input, 2_u32.pow(bit - 1) + 1))
-            .unzip();
-
-        let (bot_input, top_input): (Vec<_>, Vec<Vec<_>>) = top_input.into_iter()
-            .filter_map(|mut input| {
-                let fst = input.pop();
-                fst.zip(Some(input))
-            })
-            .unzip();
-        let (not, bot_input): (Vec<Not>, Vec<_>) = bot_input.into_iter()
-            .map(|input| Not::create(input))
-            .unzip();
-        let (bot_branch, bot_input): (Vec<BranchN>, Vec<Vec<_>>) = bot_input.into_iter()
-            .map(|input| BranchN::create(input, 2_u32.pow(bit - 1)))
-            .unzip();
-
-        let mut top_input: Vec<_> = top_input.into_iter()
-            .map(|input| input.into_iter())
-            .collect();
-        let mut bot_input: Vec<_> = bot_input.into_iter()
-            .map(|input| input.into_iter())
-            .collect();
-
-        let (andn, output): (Vec<_>, Vec<_>) = (0..2_usize.pow(bit)).map(|i| {
-            let input: Vec<_> = masks.iter()
-                .map(|(j, mask)| match mask & i {
-                    0 => bot_input[*j].next().unwrap(),
-                    _ => top_input[*j].next().unwrap(),
-                }).collect();
-            AndN::create(input)
-        }).unzip();
-
-        let branch: Vec<BranchN> = top_branch.into_iter()
-            .chain(bot_branch)
-            .collect();
-        (Self { not, branch, and: andn}, output)
+impl<const N: usize, const M: usize> Wiring<N, M> {
+    fn create(table: [usize; M]) -> Self {
+        Self { table }
     }
-
-    fn debug() -> Computer {
-        let bit = 8;
-        let (input_s, input_r): (Vec<_>, _) = (0..bit).map(|_| mpsc::channel()).unzip();
-        let (decoder, output) = BitDecoder::create(input_r);
-        let block = Block {comps: vec![Box::new(decoder)]};
-        let computer = Computer {input: input_s, output, block, input_cache: vec![false; bit]};
-        return computer;
+}
+impl<const N: usize, const M: usize> Wiring<N, M> {
+    // コンパイラには違う方に見えるけど実際は同じものをラップする
+    fn wrapper() -> Self {
+        let mut table = [0; M];
+        table.iter_mut().zip(0..N).for_each(|(t, n)| *t = n);
+        Self { table }
     }
-    fn iter(&self) -> Vec<&dyn Component> {
-        self.branch.iter().map(|b| b as &dyn Component)
-            .chain(self.and.iter().map(|a| a as &dyn Component))
-            .chain(self.not.iter().map(|n| n as &dyn Component))
-            .collect()
+}
+impl<const N: usize> Wiring<N, N> {
+    fn unzip<const S: usize>() -> Self {
+        // [[usize; S]; sep] -> [[usize; sep];S]
+        let mut table = [0; N];
+        let sep = N / S;
+        for i in 0..sep {
+            for j in 0..S {
+                table[i * S + j] = j * sep + i;
+            }
+        }
+        Self { table }
+    }
+}
+
+const fn pow2(n: usize) -> usize {
+    2_usize.pow(n as u32)
+}
+
+struct BitDecoder<const N: usize>
+where
+    MergeLayers<N, { N * pow2(N) }, { pow2(N) }>: Sized,
+{
+    decoder: MergeLayers<N, { N * pow2(N) }, { pow2(N) }>,
+}
+
+impl<const N: usize> Component<N, { pow2(N) }> for BitDecoder<N>
+where
+    MergeLayers<N, { N * pow2(N) }, { pow2(N) }>: Sized,
+{
+    fn eval(&self, input: [bool; N]) -> [bool; pow2(N)] {
+        self.decoder.eval(input)
+    }
+}
+impl<const N: usize> BitDecoder<N>
+where
+    MergeLayers<N, { 2_usize * N }, { pow2(N) }>: Sized,
+    [(); 1 * N]: Sized,
+    [(); 2 * N]: Sized,
+    [(); 1 * N * 2]: Sized,
+    [(); pow2(N - 1)]: Sized,
+    [(); 1 * pow2(N)]: Sized,
+    [(); N * pow2(N)]: Sized,
+    Box<dyn Component<{ 2 * 1 * N }, { 2 * 1 * N }>>: Sized,
+{
+    fn new() -> Self {
+        let layer1 = ConcatBlocks::create(
+            [Branch::<2>::new(); N].map(|b| Box::new(b) as Box<dyn Component<1, 2>>),
+        );
+        let layer2 = Wiring::<{ 2 * N }, { 2 * N }>::unzip::<2>();
+        let layer3: ConcatBlocks<{ 1 * N }, { 1 * N }, 2> = {
+            let not = Box::new(ConcatBlocks::create(
+                [Not::new(); N].map(|n| Box::new(n) as Box<dyn Component<1, 1>>),
+            )) as Box<dyn Component<{ 1 * N }, { 1 * N }>>;
+            let buffer = Box::new(ConcatBlocks::create(
+                [Buffer::new(); N].map(|n| Box::new(n) as Box<dyn Component<1, 1>>),
+            )) as Box<dyn Component<{ 1 * N }, { 1 * N }>>;
+            ConcatBlocks::create([not, buffer])
+        };
+        let layer4 = {
+            let mut table = [0; N * pow2(N)];
+            for i in 0..pow2(N) {
+                for j in 0..N {
+                    let not_or_buffer = if i & (1 << j) == 0 { 1 } else { 0 };
+                    let addr = N * i + j;
+                    table[addr] = N * not_or_buffer + j;
+                }
+            }
+            Wiring::create(table)
+        };
+        let layer5 = ConcatBlocks::create(
+            [And::<N>::new(); pow2(N)].map(|a| Box::new(a) as Box<dyn Component<N, 1>>),
+        );
+
+        let in_wrapper =
+            Box::new(Wiring::<N, { 1 * N }>::wrapper()) as Box<dyn Component<N, { 1 * N }>>;
+        let layer1 = Box::new(layer1) as Box<dyn Component<{ 1 * N }, { 2 * N }>>;
+        let layer2 = Box::new(layer2) as Box<dyn Component<{ 2 * N }, { 2 * N }>>;
+        let layer23_wrapper = Box::new(Wiring::<{ 2 * N }, { 1 * N * 2 }>::wrapper())
+            as Box<dyn Component<{ 2 * N }, { 1 * N * 2 }>>;
+        let layer3 = Box::new(layer3) as Box<dyn Component<{ 1 * N * 2 }, { 1 * N * 2 }>>;
+        let layer4 = Box::new(layer4) as Box<dyn Component<{ 1 * N * 2 }, { N * pow2(N) }>>;
+        let layer5 = Box::new(layer5) as Box<dyn Component<{ N * pow2(N) }, { 1 * pow2(N) }>>;
+        let out_wrapper = Box::new(Wiring::<{ 1 * pow2(N) }, { pow2(N) }>::wrapper())
+            as Box<dyn Component<{ 1 * pow2(N) }, { pow2(N) }>>;
+
+        let layer5 = Box::new(MergeLayers::create(layer5, out_wrapper))
+            as Box<dyn Component<{ N * pow2(N) }, { pow2(N) }>>;
+
+        let decoder = MergeLayers::create(in_wrapper, layer1)
+            .connect_to(layer2)
+            .connect_to(layer23_wrapper)
+            .connect_to(layer3)
+            .connect_to(layer4)
+            .connect_to(layer5);
+        Self { decoder }
     }
 }
 
 struct MemoryCell {
-    ff: RSFlipFlop,
-    branch: Vec<Branch>,
-    nq: Receiver<bool>,
-    not: Not,
-    set: And,
-    reset: And,
-    read: And,
+    cell: MergeLayers<3, 2, 1>,
 }
 
-impl Component for MemoryCell {
-    fn recv(&mut self) {
-        self.iter_mut().par_iter_mut().for_each(|c| {
-            c.recv();
-        });
-        self.nq.recv().unwrap_or(false);
+impl Component<3, 1> for MemoryCell {
+    fn eval_recur(&mut self, input: [bool; 3]) -> [bool; 1] {
+        self.cell.eval_recur(input)
     }
-    fn send(&self) -> Result<(), SendError<bool>> {
-        for c in self.iter() {
-            c.send()?;
-        }
-        Ok(())
-    }
-    fn needed_step(&self) -> usize {
-        let margin = 2;
-        self.branch.get(0).map(|b| b.needed_step()).unwrap_or(1)
-            + self.not.needed_step()
-            + self.reset.needed_step()
-            + self.ff.needed_step()
-            + self.read.needed_step()
-            + margin
+    fn eval(&self, input: [bool; 3]) -> [bool; 1] {
+        self.cell.eval(input)
     }
 }
 
 impl MemoryCell {
-    fn create(
-        value: Receiver<bool>,
-        read: Receiver<bool>,
-        write: Receiver<bool>
-    ) -> (Self, Receiver<bool>) {
-        let (branch1, (b1_set_and, b1_reset_not)) = Branch::create(value);
-        let (branch2, (b2_reset_and, b2_set_and)) = Branch::create(write);
-        let (not, not_reset_and) = Not::create(b1_reset_not);
-        let (and1, reset) = And::create(not_reset_and, b2_reset_and);
-        let (and2, set) = And::create(b1_set_and, b2_set_and);
-        let (ff, q, nq) = RSFlipFlop::create(reset, set);
-        let (read_select, output) = And::create(read, q);
-        let cell = MemoryCell {
-            ff,
-            branch: vec![branch1, branch2],
-            nq,
-            not,
-            reset: and2,
-            set: and1,
-            read: read_select,
+    fn new() -> Self {
+        let cell: MergeLayers<2, 2, 1> = {
+            let layer1 = Wiring::<2, 4>::create([0, 1, 0, 1]);
+            let layer2 = ConcatBlocks::create(
+                [Box::new(Not::new()) as Box<dyn Component<1, 1>>,
+                Box::new(Buffer::new()) as Box<dyn Component<1, 1>>,
+                Box::new(Buffer::new()) as Box<dyn Component<1, 1>>,
+                Box::new(Buffer::new()) as Box<dyn Component<1, 1>>]
+            );
+            let layer3 = ConcatBlocks::create(
+                [And::<2>::new(); 2].map(|a| Box::new(a) as Box<dyn Component<2, 1>>)
+            );
+            let ff = RSFlipFlop::new();
+            let layer1 = Box::new(layer1);
+            let layer2 = Box::new(layer2);
+            let layer3 = Box::new(layer3);
+            let layer4 = Box::new(ff) as Box<dyn Component<2, 2>>;
+            let pick_only_q = Box::new(Wiring::create([0]));
+            
+            MergeLayers::create(layer1, layer2)
+                .connect_to(layer3)
+                .connect_to(layer4)
+                .connect_to(pick_only_q)
         };
-        (cell, output)
+        let read_select = Or::<2>::new();
+        let cell = ConcatDifferentShapeBlocks::<1, 2, 1, 1>::create(
+            Box::new(Buffer::new()),
+            Box::new(cell)
+        );
+        let cell = MergeLayers::create(Box::new(cell), Box::new(read_select));
+        Self {cell}
     }
-    fn debug() -> Computer {
-        let (value_s, value_r) = mpsc::channel();
-        let (read_s, read_r) = mpsc::channel();
-        let (write_s, write_r) = mpsc::channel();
-        let (cell, output) = Self::create(value_r, read_r, write_r);
-        let block = Block {comps: vec![Box::new(cell)]};
-        let computer = Computer {
-            input: vec![value_s, read_s, write_s],
-            output: vec![output],
-            block,
-            input_cache: vec![false; 3],
+}
+
+struct MemoryByte<const N: usize> where
+    [(); N + 2]: Sized,
+    [(); 3 * N]: Sized,
+{
+    byte: MergeLayers<{N + 2}, {3 * N}, N>
+}
+
+impl<const N: usize> Component<{N + 2}, N> for MemoryByte<N> where
+    [(); 3 * N]: Sized,
+{
+    fn eval_recur(&mut self, input: [bool; N + 2]) -> [bool; N] {
+        self.byte.eval_recur(input)
+    }
+    fn eval(&self, input: [bool; N + 2]) -> [bool; N] {
+        self.byte.eval(input)
+    }
+}
+
+impl<const N: usize> MemoryByte<N> where
+    [(); N + 2]: Sized,
+    [(); 1 * N]: Sized,
+    [(); 3 * N]: Sized,
+{
+    fn new() -> Self {
+        let mut layer1_table = [0; 3 * N];
+        layer1_table.iter_mut()
+            .enumerate()
+            .for_each(|(i, v)| *v = match i % 3 {
+                0 | 1 => i % 3,
+                _ => i / 3 + 2,
+            });
+        let layer1: Wiring<{N + 2}, {3 * N}> = Wiring::create(layer1_table);
+        let cells = ConcatBlocks::create(
+            [0; N].map(|c| Box::new(MemoryCell::new()) as Box<dyn Component<3, 1>>)
+        );
+        let out_wrapper = Wiring::<{1 * N}, N>::wrapper();
+        let cells = MergeLayers::create(Box::new(cells), Box::new(out_wrapper));
+        let byte: MergeLayers<{N + 2}, {3 * N}, N> = MergeLayers::create(
+            Box::new(layer1),
+            Box::new(cells)
+        );
+        Self {byte}
+    }
+
+}
+
+macro_rules! ExistUntilx4 {
+    ($N:expr) => {
+        (
+            [(); $N],
+            [(); 1 * $N],
+            [(); 2 * $N],
+            [(); 3 * $N],
+            [(); 4 * $N],
+            [(); 1 * (1 * $N)],
+            [(); 1 * (2 * $N)],
+            [(); 1 * (3 * $N)],
+            [(); 1 * (4 * $N)],
+            [(); 2 * (1 * $N)],
+            [(); 2 * (2 * $N)],
+        )
+    };
+}
+
+struct Memory<const Address: usize, const Bit: usize> where
+    [(); Address + Bit + 2]: Sized,
+    [(); pow2(Address) * Bit]: Sized,
+{
+    memory: MergeLayers<{Address + Bit + 2}, {pow2(Address) * Bit}, Bit>
+}
+
+impl<const Address: usize, const Bit: usize>
+    Component<{Address + Bit + 2}, Bit> for Memory<Address, Bit>
+where
+    [(); Address + Bit + 2]: Sized,
+    [(); pow2(Address) * Bit]: Sized,
+{
+    fn eval_recur(&mut self, input: [bool; Address + Bit + 2]) -> [bool; Bit] {
+        self.eval_recur(input)
+    }
+    fn eval(&self, input: [bool; Address + Bit + 2]) -> [bool; Bit] {
+        self.eval(input)
+    }
+}
+
+
+impl<const Address: usize, const Bit: usize> Memory<Address, Bit> where
+    [(); Address + Bit + 2]: Sized,
+    ([(); 2 + Address], [(); 2 + Address + 1 * Bit]): Sized,
+    [(); pow2(Address) * Bit]: Sized,
+    [(); Bit * pow2(Address)]: Sized,
+    [(); (Bit + 2) * pow2(Address)]: Sized,
+    [(); 2 * pow2(Address) + 1 * Bit]: Sized,
+    [(); 2 * pow2(Address) * Bit]: Sized,
+    [(); 2 + pow2(Address)]: Sized,
+    ExistUntilx4!(pow2(Address)): Sized,
+    ExistUntilx4!(Bit): Sized,
+
+    BitDecoder<Address>: Sized,
+    MergeLayers<Address, { 2_usize * Address }, { pow2(Address) }>: Sized,
+    [(); 1 * Address * 2]: Sized,
+    [(); pow2(Address - 1)]: Sized,
+    Or<{pow2(Address)}>: Sized,
+    [(); Address * pow2(Address)]: Sized,
+    Box<dyn Component<{ 2 * 1 * Address }, { 2 * 1 * Address }>>: Sized,
+{
+    fn new() -> Self {
+        let read_write_select: MergeLayers<{2 + Address}, {4 * pow2(Address)}, {2 * pow2(Address)}> = {
+            let decoder = BitDecoder::<Address>::new();
+            let read_write = ConcatBlocks::create(
+                [Buffer::new(); 2].map(|b| Box::new(b) as Box<dyn Component<1, 1>>)
+            );
+            let layer1 = ConcatDifferentShapeBlocks::<2, Address, 2, {pow2(Address)}>::create(
+                Box::new(read_write),
+                Box::new(decoder)
+            );
+            let mut layer2_table = [0; 4 * pow2(Address)];
+            layer2_table.iter_mut()
+                .enumerate()
+                .for_each(|(i, v)| *v = match i % 4 {
+                    0 => 0,
+                    2 => 1,
+                    _ => i / 4 + 2,
+                });
+            let layer2 = Wiring::<{2 + pow2(Address)}, {4 * pow2(Address)}>::create(layer2_table);
+            let layer23_wrapper = Wiring::<{4 * pow2(Address)}, {2 * (2 * pow2(Address))}>::wrapper();
+            let layer3 = ConcatBlocks::<2, 1, {2 * pow2(Address)}>::create(
+                [And::<2>::new(); 2 * pow2(Address)].map(|b| Box::new(b) as Box<dyn Component<2, 1>>)
+            );
+            let out_wapper = Wiring::<{1 * (2 * pow2(Address))}, {2 * pow2(Address)}>::wrapper();
+
+            let layer3 = MergeLayers::create(Box::new(layer23_wrapper), Box::new(layer3))
+                .connect_to(Box::new(out_wapper));
+
+            MergeLayers::create(Box::new(layer1), Box::new(layer2))
+                .connect_to(Box::new(layer3))
         };
-        return computer;
-    }
-    fn iter(&self) -> Vec<Box<&dyn Component>> {
-        self.branch.iter()
-            .map(|b| Box::new(b as &dyn Component))
-            .chain(vec![
-                   Box::new(&self.not as &dyn Component),
-                   Box::new(&self.set as &dyn Component),
-                   Box::new(&self.reset as &dyn Component),
-                   Box::new(&self.ff as &dyn Component),
-                   Box::new(&self.read as &dyn Component),
-            ])
-            .collect()
-    }
-    fn iter_mut(&mut self) -> Vec<Box<&mut (dyn Component + Send)>> {
-        self.branch.iter_mut()
-            .map(|b| Box::new(b as &mut (dyn Component + Send)))
-            .chain(vec![
-                   Box::new(&mut self.not as &mut (dyn Component + Send)),
-                   Box::new(&mut self.set as &mut (dyn Component + Send)),
-                   Box::new(&mut self.reset as &mut (dyn Component + Send)),
-                   Box::new(&mut self.ff as &mut (dyn Component + Send)),
-                   Box::new(&mut self.read as &mut (dyn Component + Send)),
-            ])
-            .collect()
-    }
-}
 
-struct MemoryByte {
-    cells: Vec<MemoryCell>,
-    write_branch: BranchN,
-    read_branch: BranchN,
-}
+        let values = ConcatBlocks::create(
+            [Buffer::new(); Bit].map(|b| Box::new(b) as Box<dyn Component<1, 1>>)
+        );
 
-impl Component for MemoryByte {
-    fn recv(&mut self) {
-        self.write_branch.recv();
-        self.read_branch.recv();
-        self.cells.par_iter_mut().for_each(|cell| {
-            cell.recv();
-        });
-    }
-    fn send(&self) -> Result<(), SendError<bool>> {
-        self.write_branch.send()?;
-        self.read_branch.send()?;
-        for cell in self.cells.iter() {
-            cell.send()?;
-        }
-        Ok(())
-    }
-    fn needed_step(&self) -> usize {
-        let margin = 2;
-        self.cells.get(0).map(|c| c.needed_step()).unwrap_or(1)
-            + self.write_branch.needed_step()
-            + self.read_branch.needed_step()
-            + margin
-    }
-}
-
-impl MemoryByte {
-    fn create(
-        values: Vec<Receiver<bool>>,
-        write_select: Receiver<bool>,
-        read_select: Receiver<bool>
-    ) -> (Self, Vec<Receiver<bool>>) {
-        let bit = values.len() as u32;
-        let (write_branch, write_selects) = BranchN::create(write_select, bit);
-        let (read_branch, read_selects) = BranchN::create(read_select, bit);
-        let (cells, output): (Vec<_>, Vec<_>) = write_selects.into_iter()
-            .zip(read_selects.into_iter())
-            .zip(values.into_iter())
-            .map(|((w, r), v)| MemoryCell::create(v, r, w))
-            .unzip();
-        let byte = Self {cells, read_branch, write_branch};
-        (byte, output)
-    }
-    fn debug() -> Computer {
-        let bit = 8;
-        let (value_s, value_r) = (0..bit).map(|_| mpsc::channel()).unzip();
-        let (write_s, write_r) = mpsc::channel();
-        let (read_s, read_r) = mpsc::channel();
-        let (byte, output) = Self::create(value_r, write_r, read_r);
-        let block = Block { comps: vec![Box::new(byte)]};
-        let input = vec![read_s, write_s].into_iter()
-            .chain::<Vec<_>>(value_s).collect();
-        // read, writeの+2
-        let computer = Computer {input, output, block, input_cache: vec![false; bit + 2]};
-        return computer;
-    }
-}
-
-fn transpose<T>(mat: Vec<Vec<T>>) -> Vec<Vec<T>> {
-    let mut trans = vec![];
-    let row = mat.get(0).map(|r| r.len()).unwrap_or(0);
-    let mut mat: Vec<_> = mat.into_iter().map(|r| r.into_iter()).collect();
-    for _ in 0..row {
-        trans.push(mat.iter_mut().map(|r| r.next().unwrap()).collect());
-    }
-    return trans;
-}
-
-struct Memory {
-    decoder: BitDecoder,
-    read_write_branch: Vec<Branch>,
-    read_branch: BranchN,
-    write_branch: BranchN,
-    data_branch: Vec<BranchN>,
-    read_and: Vec<And>,
-    write_and: Vec<And>,
-    bytes: Vec<MemoryByte>,
-    bit_collect: Vec<OrN>,
-}
-
-impl Component for Memory {
-    fn recv(&mut self) {
-        self.iter_mut().par_iter_mut().for_each(|comp| {
-            comp.recv();
-        });
-    }
-    fn send(&self) -> Result<(), SendError<bool>> {
-        for comp in self.iter() {
-            comp.send()?;
-        }
-        Ok(())
-    }
-    fn fast_send(&mut self) -> Result<(), SendError<bool>> {
-        self.iter_mut().par_iter_mut().map(|comp| comp.send().map(|_| 0))
-            .sum::<Result<i32, _>>()
-            .map(|_| ())
-    }
-    fn needed_step(&self) -> usize {
-        let margin = 2;
-        self.decoder.needed_step()
-            + self.read_write_branch.get(0).map(|b| b.needed_step()).unwrap_or(1)
-            + self.read_branch.needed_step()
-            + self.write_branch.needed_step()
-            + self.read_and.get(0).map(|a| a.needed_step()).unwrap_or(1)
-            + self.write_and.get(0).map(|a| a.needed_step()).unwrap_or(1)
-            + self.bytes.get(0).map(|b| b.needed_step()).unwrap_or(1)
-            + self.bit_collect.get(0).map(|c| c.needed_step()).unwrap_or(1)
-            + margin
-    }
-}
-
-impl Memory {
-    fn create(
-        address: Vec<Receiver<bool>>,
-        read: Receiver<bool>,
-        write: Receiver<bool>,
-        data: Vec<Receiver<bool>>,
-    ) -> (Self, Vec<Receiver<bool>>) {
-        let byte_num = 2_u32.pow(address.len() as u32);
-        let _bit_num = data.len();
-        let (decoder, address_select) = BitDecoder::create(address);
-        let (read_write_branch, address_select): (Vec<_>, Vec<_>) = address_select.into_iter()
-            .map(|address| Branch::create(address))
-            .unzip();
-        let (read_select, write_select): (Vec<_>, Vec<_>) = address_select.into_iter().unzip();
-        let (read_branch, read) = BranchN::create(read, byte_num);
-        let (write_branch, write) = BranchN::create(write, byte_num);
-        let (read_and, read): (Vec<_>, Vec<_>) = read.into_iter()
-            .zip(read_select)
-            .map(|(r, select)| And::create(r, select))
-            .unzip();
-        let (write_and, write): (Vec<_>, Vec<_>) = write.into_iter()
-            .zip(write_select)
-            .map(|(w, select)| And::create(w, select))
-            .unzip();
-        let (data_branch, data): (Vec<_>, Vec<_>) = data.into_iter()
-            .map(|val| BranchN::create(val, byte_num))
-            .unzip();
-        let data_t = transpose(data);
-        let (bytes, read_byte): (Vec<_>, Vec<Vec<_>>) = read.into_iter()
-            .zip(write)
-            .zip(data_t)
-            .map(|((r, w), d)| MemoryByte::create(d, w, r))
-            .unzip();
-        let read_byte_t = transpose(read_byte);
-        let (bit_collect, output): (Vec<_>, Vec<_>) = read_byte_t.into_iter()
-            .map(|r| OrN::create(r))
-            .unzip();
-        let memory = Memory {
-            decoder,
-            read_write_branch,
-            read_branch,
-            write_branch,
-            data_branch,
-            read_and,
-            write_and,
-            bytes,
-            bit_collect,
-        };
-        return (memory, output);
-    }
-    fn debug() -> Computer {
-        let address_num = 8;
-        let bit_num = 8;
-        let (address_s, address_r): (Vec<_>, Vec<_>) = (0..address_num)
-            .map(|_| mpsc::channel())
-            .unzip();
-        let (read_s, read_r) = mpsc::channel();
-        let (write_s, write_r) = mpsc::channel();
-        let (data_s, data_r): (Vec<_>, Vec<_>) = (0..bit_num)
-            .map(|_| mpsc::channel())
-            .unzip();
-        let (memory, output) = Self::create(address_r, read_r, write_r, data_r);
-        let input: Vec<_> = vec![read_s, write_s].into_iter()
-            .chain(address_s)
-            .chain(data_s)
-            .collect();
-        let block = Block {
-            comps: vec![Box::new(memory)],
-        };
-        let input_cache = input.iter().map(|_| false).collect();
-        let computer = Computer {
-            input,
-            output,
-            block,
-            input_cache,
-        };
-        return computer;
-    }
-    fn iter(&self) -> Vec<&dyn Component> {
-        let branch = self.read_write_branch.iter()
-            .map(|c| c as &dyn Component);
-        let branch_n = vec![&self.read_branch, &self.write_branch].into_iter()
-            .chain(self.data_branch.iter())
-            .map(|c| c as &dyn Component);
-        let and  = self.read_and.iter()
-            .chain(self.write_and.iter())
-            .map(|c| c as &dyn Component);
-        let bytes = self.bytes.iter()
-            .map(|c| c as &dyn Component);
-        let or = self.bit_collect.iter()
-             .map(|c| c as &dyn Component);
-        let comps = vec![&self.decoder as &dyn Component].into_iter()
-            .chain(branch)
-            .chain(branch_n)
-            .chain(and)
-            .chain(bytes)
-            .chain(or)
-            .collect();
-        return comps;
-    }
-    fn iter_mut(&mut self) -> Vec<&mut (dyn Component + Send)> {
-        let branch = self.read_write_branch.iter_mut()
-            .map(|c| c as &mut (dyn Component + Send));
-        let branch_n = vec![&mut self.read_branch, &mut self.write_branch].into_iter()
-            .chain(self.data_branch.iter_mut())
-            .map(|c| c as &mut (dyn Component + Send));
-        let and  = self.read_and.iter_mut()
-            .chain(self.write_and.iter_mut())
-            .map(|c| c as &mut (dyn Component + Send));
-        let bytes = self.bytes.iter_mut()
-            .map(|c| c as &mut (dyn Component + Send));
-        let or = self.bit_collect.iter_mut()
-            .map(|c| c as &mut (dyn Component + Send));
-        let comps = vec![&mut self.decoder as &mut (dyn Component + Send)].into_iter()
-            .chain(branch)
-            .chain(branch_n)
-            .chain(and)
-            .chain(bytes)
-            .chain(or)
-            .collect();
-        return comps;
-    }
-}
-
-struct Clock {
-    freq: u32,
-    count: u32,
-    output: Sender<bool>,
-    cache: bool,
-}
-
-impl Component for Clock {
-    fn recv(&mut self) {
-        if self.count == 0 {
-            self.cache = !self.cache;
-            self.count = self.freq;
-        }
-        self.count -= 1;
-    }
-    fn send(&self) -> Result<(), SendError<bool>> {
-        self.output.send(self.cache)
-    }
-}
-
-struct Block {
-    comps: Vec<Box<dyn Component>>,
-}
-
-impl Component for Block {
-    fn recv(&mut self) {
-        for comp in self.comps.iter_mut() {
-            comp.recv();
-        }
-    }
-    fn send(&self) -> Result<(), SendError<bool>> {
-        for comp in self.comps.iter() {
-            comp.send()?;
-        }
-        Ok(())
-    }
-    fn fast_send(&mut self) -> Result<(), SendError<bool>> {
-        for comp in self.comps.iter_mut() {
-            comp.fast_send()?;
-        }
-        Ok(())
-    }
-    fn needed_step(&self) -> usize {
-        self.comps.iter().map(|comp| comp.needed_step()).sum()
-    }
-}
-
-impl Block {
-    fn from_text(text: &str) -> (Block, Vec<Sender<bool>>, Vec<Receiver<bool>>) {
-        let mut text = text.split_whitespace()
-            .map(String::from)
-            .collect();
-        let mut comps = vec![];
-        let mut input = BTreeMap::new();
-        let mut output = vec![];
-        while let Ok(r) = Self::parser(&mut text, &mut comps, &mut input) {
-            output.push(r);
-        }
-        let input = input.into_values().collect();
-        let block = Block {comps};
-        return (block, input, output);
-    }
-    fn parser(
-        text:  &mut Vec<String>,
-        comps: &mut Vec<Box<dyn Component>>,
-        input: &mut BTreeMap<String, Sender<bool>>,
-    ) -> Result<Receiver<bool>, String>{
-        if let Some(op) = text.pop() {
-            match op.as_str() {
-                "and" => {
-                    let input1 = Self::parser(text, comps, input)?;
-                    let input2 = Self::parser(text, comps, input)?;
-                    let (s, r) = mpsc::channel();
-                    let and = And::new(input1, input2, s);
-                    comps.push(Box::new(and));
-                    Ok(r)
-                },
-                "or" => {
-                    let input1 = Self::parser(text, comps, input)?;
-                    let input2 = Self::parser(text, comps, input)?;
-                    let (s, r) = mpsc::channel();
-                    let or = Or::new(input1, input2, s);
-                    comps.push(Box::new(or));
-                    Ok(r)
-                },
-                "not" => {
-                    let input1 = Self::parser(text, comps, input)?;
-                    let (s, r) = mpsc::channel();
-                    let not = Not::new(input1, s);
-                    comps.push(Box::new(not));
-                    Ok(r)
-                },
-                op => {
-                    let (s, r) = mpsc::channel();
-                    if let Some(branch_s) = input.insert(op.to_string(), s) {
-                        let (s2, r2) = mpsc::channel();
-                        let branch = Branch::new(r, branch_s, s2);
-                        comps.push(Box::new(branch));
-                        Ok(r2)
-                    } else {
-                        Ok(r)
-                    }
+        let in_wrapper = Wiring::<{Address + Bit + 2}, {2 + Address + 1 * Bit}>::wrapper();
+        let layer1 = ConcatDifferentShapeBlocks::<{2 + Address}, {1 * Bit}, {2 * pow2(Address)}, {1 * Bit}>::create(
+            Box::new(read_write_select),
+            Box::new(values)
+        );
+        let mut layer2_table = [0; (Bit + 2) * pow2(Address)];
+        layer2_table.iter_mut()
+            .enumerate()
+            .for_each(|(i, v)| {
+                let p = i % (Bit + 2);
+                *v = if p == 0 || p == 1 {
+                    i / (Bit + 2) + p
+                } else {
+                    2 * pow2(Address) + p - 2
                 }
-            }
-        } else {
-            Err("too short".to_string())
-        }
+            });
+        let layer2 = Wiring::create(layer2_table);
+        let bytes = ConcatBlocks::<{Bit + 2}, Bit, {pow2(Address)}>::create(
+            [0; pow2(Address)].map(|_| {
+                Box::new(MemoryByte::new()) as Box<dyn Component<{Bit + 2}, Bit>>
+            })
+        );
+        let layer3 = Wiring::unzip::<Bit>();
+        let layer34_wrapper = Wiring::<{Bit * pow2(Address)}, {pow2(Address) * Bit}>::wrapper();
+        let layer4 = ConcatBlocks::create(
+            [Or::<{pow2(Address)}>::new(); Bit].map(|c| {
+                Box::new(c) as Box<dyn Component<{pow2(Address)}, 1>>
+            })
+        );
+        let out_wrapper = Wiring::<{1 * Bit}, Bit>::wrapper();
+        let layer4 = MergeLayers::create(Box::new(layer4), Box::new(out_wrapper));
+
+        let memory = MergeLayers::create(Box::new(in_wrapper), Box::new(layer1))
+            .connect_to(Box::new(layer2))
+            .connect_to(Box::new(bytes))
+            .connect_to(Box::new(layer3))
+            .connect_to(Box::new(layer34_wrapper))
+            .connect_to(Box::new(layer4));
+
+        Self {memory}
     }
 }
 
-struct Computer {
-    input: Vec<Sender<bool>>,
-    output: Vec<Receiver<bool>>,
-    block: Block,
-    input_cache: Vec<bool>,
-}
-
-impl Computer {
-    fn from_text(text: &str) -> Self {
-        let (block, input, output) = Block::from_text(text);
-        let input_cache = vec![false; input.len()];
-        Computer {input, output, block, input_cache}
-    }
-    fn step(&mut self, input: Vec<bool>) -> Result<Vec<bool>, SendError<bool>> {
-        for (cache, f) in self.input_cache.iter_mut().zip(&input) {
-            *cache = *f;
-        }
-        for (i, s) in self.input.iter().enumerate() {
-            let f = input.get(i).cloned().unwrap_or(false);
-            s.send(f)?;
-        }
-        self.block.fast_send()?;
-        self.block.recv();
-        Ok(self.output.iter()
-            .map(|r| r.recv().unwrap_or(false))
-            .collect())
-    }
-    fn step_with_cache(&mut self) -> Result<Vec<bool>, SendError<bool>> {
-        self.step(self.input_cache.clone())
-    }
-    fn needed_step(&self) -> usize {
-        self.block.needed_step()
-    }
-    fn init_circuit(&mut self, input: Vec<bool>) -> Result<Vec<bool>, SendError<bool>> {
-        self.step(input)?;
-        for _ in 0..self.needed_step() {
-            self.step_with_cache()?;
-        }
-        self.step_with_cache()
-    }
-}
 
 fn main() {
-    // let mut c = Computer::from_text("i1 not i2 i2 and or");
-    // println!("{:?}", c.init_circuit(vec![true, true, false]));
-    // let mut flipflop = RSFlipFlop::debug();
-    // println!("{:?}", flipflop.init_circuit(vec![true, false]));
-    // println!("{:?}", flipflop.init_circuit(vec![false, false]));
-    // println!("{:?}", flipflop.init_circuit(vec![false, true]));
-    // println!("{:?}", flipflop.init_circuit(vec![false, false]));
-    // println!("unstable");
-    // println!("{:?}", flipflop.init_circuit(vec![true, true]));
-    // println!("{:?}", flipflop.init_circuit(vec![false, false]));
-    // for _ in 0..20 {
-    //     println!("{:?}", flipflop.step_with_cache());
-    // }
-    // let mut decoder = BitDecoder::debug();
-    // let bit = 8;
-    // let masks: Vec<i32> = (0..bit).map(|i| 1 << i).collect();
-    // for i in 0..2_i32.pow(bit) {
-    //     let input: Vec<bool> = masks.iter().map(|mask| mask & i != 0).collect();
-    //     decoder.init_circuit(input.clone()).unwrap();
-    //     decoder.init_circuit(input.clone()).unwrap();
-    //     println!("{:?}", decoder.init_circuit(input).unwrap().iter().position(|&p| p).unwrap());
-    // }
-    // let mut memory_cell = MemoryCell::debug();
-    // let write = |cell: &mut Computer, d: bool| -> bool{
-    //     cell.init_circuit(vec![d, true, true]).unwrap()[0]
-    // };
-    // write(&mut memory_cell, false);
-    // println!("{:?}", memory_cell.init_circuit(vec![false, true, false]));
-    // write(&mut memory_cell, true);
-    // println!("{:?}", memory_cell.init_circuit(vec![false, true, false]));
-    // for _ in 0..5 {
-    //     println!("{:?}", write(&mut memory_cell, false));
-    //     println!("{:?}", write(&mut memory_cell, true));
-    // }
-    // let mut memory_byte = MemoryByte::debug();
-    // let bit = 8;
-    // let read = |byte: &mut Computer| -> u32 {
-    //     let mut flag = vec![false; bit + 2];
-    //     flag[0] = true;
-    //     let output = byte.init_circuit(flag).unwrap();
-    //     output.into_iter().enumerate()
-    //         .map(|(i, b)| (1 << i) * if b {1} else{0})
-    //         .sum()
-    // };
-    // let write = |byte: &mut Computer, data: u32| -> u32 {
-    //     let masks: Vec<u32> = (0..bit).map(|i| 1 << i).collect();
-    //     let input: Vec<bool> = vec![false, true].into_iter()
-    //         .chain(masks.iter().map(|mask| mask & data != 0))
-    //         .collect();
-    //     byte.init_circuit(input).unwrap();
-    //     read(byte)
-    // };
-    // // 論理エラー
-    // // 0~63の範囲しかできない
-    // // encoding, decodingは正常
-    // for i in 0..2_u32.pow(bit as u32) {
-    //     write(&mut memory_byte, i);
-    //     println!("{:?}", read(&mut memory_byte));
-    // }
-    let mut memory = Memory::debug();
-    let address_bit = 8;
-    let memory_bit = 8;
-    let masks: Vec<_> = (0..memory_bit)
-        .map(|i| 1 << i)
-        .collect();
-    let num_to_bit = |num: u32| -> Vec<bool> {
-        masks.iter()
-            .map(|mask| mask & num != 0)
-            .collect()
-    };
-    let bit_to_num = |bits: Vec<bool>| -> u32 {
+    let memory = Memory::<8, 8>::new();
+    let bit_to_num = |bits: [bool; 8]| -> usize {
         bits.iter().enumerate()
             .map(|(i, &b)| (1 << i) * if b {1} else {0})
             .sum()
     };
-    let read = |memory: &mut Computer, address: u32| -> u32 {
-        let address_bit = num_to_bit(address);
-        let flag = vec![true, false];
-        let pad = vec![false; memory_bit];
-        let input = flag.into_iter()
-            .chain(address_bit)
-            .chain(pad)
-            .collect();
-        let output = memory.init_circuit(input).unwrap();
-        bit_to_num(output)
+    let num_to_bit = |num: usize| -> [bool; 8] {
+        let mut bits = [false; 8];
+        bits.iter_mut().enumerate()
+            .for_each(|(i, b)| *b = num & (1 << i) != 0);
+        bits
     };
-    let write = |memory: &mut Computer, address: u32, data: u32| {
-        let address_bit = num_to_bit(address);
-        let data_bit = num_to_bit(data);
-        let flag = vec![false, true];
-        let input = flag.into_iter()
-            .chain(address_bit)
-            .chain(data_bit)
-            .collect();
-        memory.init_circuit(input).unwrap();
+    let create_input = |read: bool, write: bool, addr: usize, values: usize| -> [bool; 18] {
+        let addr = num_to_bit(addr);
+        let values = num_to_bit(values);
+        let result = [false; 18];
+        result.iter_mut()
+            .zip([read, write].into_iter()
+                .chain(addr.into_iter())
+                .chain(values.into_iter()))
+            .for_each(|(v1, v2)| *v1 = v2);
+        result
     };
-    for i in 0..16 {
-        write(&mut memory, i, i);
-        println!("write {:?} in address: {:?}", i, i);
-    }
-    for i in 16..2_u32.pow(address_bit){
-        write(&mut memory, i, 0);
-        println!("write {:?} in address: {:?}", 0, i);
-    }
-    for i in 0..2_u32.pow(address_bit) {
-        println!("{:?}", read(&mut memory, i));
-    }
+    let read = |addr: usize| -> usize {
+        let input = create_input(true, false, addr, 0);
+        let result = memory.eval_recur(input);
+        bit_to_num(result)
+    };
+    let write = |addr: usize, val: usize| -> usize {
+        let input = create_input(true, true, addr, val);
+        let result = memory.eval_recur(input);
+        bit_to_num(result)
+    };
 }
