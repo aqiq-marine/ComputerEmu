@@ -70,6 +70,17 @@ where
     [(); I * N]: Sized,
     [(); O * N]: Sized,
 {
+    fn eval_recur(&mut self, input: [bool; I * N]) -> [bool; O * N] {
+        let inputs = Self::split_input(input);
+        let mut outputs = [[false; O]; N];
+        for ((result, block), val) in outputs.iter_mut().zip(self.blocks.iter_mut()).zip(inputs) {
+            result
+                .iter_mut()
+                .zip(block.eval_recur(val))
+                .for_each(|(v1, v2)| *v1 = v2);
+        }
+        Self::merge_output(outputs)
+    }
     fn eval(&self, input: [bool; I * N]) -> [bool; O * N] {
         let inputs = Self::split_input(input);
         let mut outputs = [[false; O]; N];
@@ -250,6 +261,8 @@ impl<const I: usize> NAND<I> {
     }
 }
 
+
+// Reset, Setの順
 struct RSFlipFlop {
     ff: MergeLayers<4, 4, 2>,
     nand1_to_nand2_line_state: bool,
@@ -272,14 +285,17 @@ impl Component<2, 2> for RSFlipFlop {
 
 impl RSFlipFlop {
     fn new() -> Self {
+        // Reset, Setの順にする
+        let in_wrapper = Wiring::create([3, 1, 2, 0]);
         let layer1 = ConcatBlocks::create([
             Box::new(Not::new()),
             Box::new(Buffer::new()),
             Box::new(Buffer::new()),
             Box::new(Not::new()),
         ]);
-        let layer2 = ConcatBlocks::create([Box::new(And::<2>::new()), Box::new(And::<2>::new())]);
-        let ff = MergeLayers::<4, 4, 2>::create(Box::new(layer1), Box::new(layer2));
+        let layer2 = ConcatBlocks::create([Box::new(NAND::<2>::new()), Box::new(NAND::<2>::new())]);
+        let ff = MergeLayers::create(Box::new(in_wrapper), Box::new(layer1))
+            .connect_to(Box::new(layer2));
         Self {
             ff,
             nand2_to_rand1_line_state: false,
@@ -447,10 +463,10 @@ impl Component<3, 1> for MemoryCell {
 impl MemoryCell {
     fn new() -> Self {
         let cell: MergeLayers<2, 2, 1> = {
-            let layer1 = Wiring::<2, 4>::create([1, 0, 1, 0]);
+            let layer1 = Wiring::<2, 4>::create([0, 1, 0, 1]);
             let layer2 = ConcatBlocks::create(
-                [Box::new(Not::new()) as Box<dyn Component<1, 1>>,
-                Box::new(Buffer::new()) as Box<dyn Component<1, 1>>,
+                [Box::new(Buffer::new()) as Box<dyn Component<1, 1>>,
+                Box::new(Not::new()) as Box<dyn Component<1, 1>>,
                 Box::new(Buffer::new()) as Box<dyn Component<1, 1>>,
                 Box::new(Buffer::new()) as Box<dyn Component<1, 1>>]
             );
@@ -469,7 +485,7 @@ impl MemoryCell {
                 .connect_to(layer4)
                 .connect_to(pick_only_q)
         };
-        let read_select = Or::<2>::new();
+        let read_select = And::<2>::new();
         let cell = ConcatDifferentShapeBlocks::<1, 2, 1, 1>::create(
             Box::new(Buffer::new()),
             Box::new(cell)
@@ -588,7 +604,7 @@ impl<const Address: usize, const Bit: usize> Memory<Address, Bit> where
     Box<dyn Component<{ 2 * 1 * Address }, { 2 * 1 * Address }>>: Sized,
 {
     fn new() -> Self {
-        let read_write_select: MergeLayers<{2 + Address}, {4 * pow2(Address)}, {2 * pow2(Address)}> = {
+        let read_write_addr_select: MergeLayers<{2 + Address}, {4 * pow2(Address)}, {2 * pow2(Address)}> = {
             let decoder = BitDecoder::<Address>::new();
             let read_write = ConcatBlocks::create(
                 [Buffer::new(); 2].map(|b| Box::new(b) as Box<dyn Component<1, 1>>)
@@ -625,7 +641,7 @@ impl<const Address: usize, const Bit: usize> Memory<Address, Bit> where
 
         let in_wrapper = Wiring::<{Address + Bit + 2}, {2 + Address + 1 * Bit}>::wrapper();
         let layer1 = ConcatDifferentShapeBlocks::<{2 + Address}, {1 * Bit}, {2 * pow2(Address)}, {1 * Bit}>::create(
-            Box::new(read_write_select),
+            Box::new(read_write_addr_select),
             Box::new(values)
         );
         let mut layer2_table = [0; (Bit + 2) * pow2(Address)];
@@ -634,7 +650,7 @@ impl<const Address: usize, const Bit: usize> Memory<Address, Bit> where
             .for_each(|(i, v)| {
                 let p = i % (Bit + 2);
                 *v = if p == 0 || p == 1 {
-                    i / (Bit + 2) + p
+                    2 * i / (Bit + 2) + p
                 } else {
                     2 * pow2(Address) + p - 2
                 }
@@ -701,13 +717,27 @@ fn main() {
         let result = memory.memory.eval_recur(input);
         bit_to_num(result)
     };
+
     // println!("{:?}", write(&mut memory, 1, 1));
-    // for i in 0..255 {
-    //     write(&mut memory, i, i);
-    // }
-    // for i in 0..255 {
-    //     println!("{:?}", read(&mut memory, i));
-    // }
+    for i in 0..128 {
+        write(&mut memory, i, i);
+    }
+    for i in 128..256 {
+        write(&mut memory, i, 0);
+    }
+    for i in 0..256 {
+        println!("{:?}", read(&mut memory, i));
+    }
+
+    // let mut ff = RSFlipFlop::new();
+    // println!("{:?}", ff.eval_recur([false, true]));
+
+    // let mut cell = MemoryCell::new();
+    // println!("{:?}", cell.eval_recur([true, true, false]));
+    // println!("{:?}", cell.eval_recur([true, true, true]));
+    // println!("{:?}", cell.eval_recur([true, false, false]));
+    // println!("{:?}", cell.eval_recur([false, false, false]));
+    
     // let mut ff = MemoryByte::<8>::new();
     // let rw_input = |n: usize| -> [bool; 10] {
     //     let bits = num_to_bit(n);
@@ -719,7 +749,8 @@ fn main() {
     //     result[1] = true;
     //     result
     // };
-    // println!("{:?}", bit_to_num(ff.eval_recur(rw_input(10))));
+    // println!("{:?}", bit_to_num(ff.eval_recur(rw_input(127))));
+
     // let mut decoder = BitDecoder::<8>::new();
     // println!("{:?}", decoder.eval_recur([true; 8]));
 }
