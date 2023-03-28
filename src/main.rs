@@ -604,6 +604,7 @@ impl<const Address: usize, const Bit: usize> Memory<Address, Bit> where
     Box<dyn Component<{ 2 * 1 * Address }, { 2 * 1 * Address }>>: Sized,
 {
     fn new() -> Self {
+        // 2 (read, write) * 2^Address (バイト数)
         let read_write_addr_select: MergeLayers<{2 + Address}, {4 * pow2(Address)}, {2 * pow2(Address)}> = {
             let decoder = BitDecoder::<Address>::new();
             let read_write = ConcatBlocks::create(
@@ -652,9 +653,12 @@ impl<const Address: usize, const Bit: usize> Memory<Address, Bit> where
                 *v = if p == 0 || p == 1 {
                     2 * i / (Bit + 2) + p
                 } else {
+                    // アドレスごとのread, writeの読み飛ばし + p - 2 (read, write)
                     2 * pow2(Address) + p - 2
                 }
             });
+        // read0, write0, read1, write1, ...
+        // -> read0, data0, data1, ..., data_{Bit}, write0, data0, ..., data_{Bit}, ...
         let layer2 = Wiring::<{2 * pow2(Address) + 1 * Bit}, {(Bit + 2) * pow2(Address)}>::create(layer2_table);
         let bytes = ConcatBlocks::<{Bit + 2}, Bit, {pow2(Address)}>::create(
             [0; pow2(Address)].map(|_| {
@@ -679,6 +683,56 @@ impl<const Address: usize, const Bit: usize> Memory<Address, Bit> where
             .connect_to(Box::new(layer4));
 
         Self {memory}
+    }
+}
+
+struct HalfAdder {
+    adder: MergeLayers<2, 4, 2>,
+}
+impl Component<2, 2> for HalfAdder {
+    fn eval(&self, input: [bool; 2]) -> [bool; 2] {
+        self.adder.eval(input)
+    }
+}
+
+impl HalfAdder {
+    fn new() -> Self {
+        let layer1 = Wiring::create([0, 1, 0, 1]);
+        let layer2 = ConcatBlocks::create(
+            [And::<2>::new(); 2].map(|a| Box::new(a) as Box<dyn Component<2, 1>>)
+        );
+        let adder = MergeLayers::create(Box::new(layer1), Box::new(layer2));
+        Self {adder}
+    }
+}
+
+struct FullAdder {
+    adder: MergeLayers<3, 3, 2>,
+}
+
+impl Component<3, 2> for FullAdder {
+    fn eval(&self, input: [bool; 3]) -> [bool; 2] {
+        self.adder.eval(input)
+    }
+}
+
+impl FullAdder {
+    fn new() -> Self {
+        let layer1 = ConcatDifferentShapeBlocks::create(
+            Box::new(Buffer::new()),
+            Box::new(HalfAdder::new()),
+        );
+        let layer2 = ConcatDifferentShapeBlocks::create(
+            Box::new(HalfAdder::new()),
+            Box::new(Buffer::new())
+        );
+        let layer3 = ConcatDifferentShapeBlocks::create(
+            Box::new(Buffer::new()),
+            Box::new(Or::<2>::new()),
+        );
+        let adder = MergeLayers::create(Box::new(layer1), Box::new(layer2))
+            .connect_to(Box::new(layer3));
+        Self {adder}
     }
 }
 
