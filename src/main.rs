@@ -10,6 +10,19 @@ trait Component<const I: usize, const O: usize> {
     }
 }
 
+struct DebugLayer<const N: usize> {}
+impl<const N: usize> Component<N, N> for DebugLayer<N> {
+    fn eval(&self, input: [bool; N]) -> [bool; N] {
+        println!("{:?}", input);
+        input
+    }
+}
+impl<const N: usize> DebugLayer<N> {
+    fn new() -> Self {
+        Self {}
+    }
+}
+
 struct MergeLayers<const I: usize, const M: usize, const O: usize> {
     layer1: Box<dyn Component<I, M>>,
     layer2: Box<dyn Component<M, O>>,
@@ -26,11 +39,24 @@ impl<const I: usize, const M: usize, const O: usize> MergeLayers<I, M, O> {
     fn create(layer1: Box<dyn Component<I, M>>, layer2: Box<dyn Component<M, O>>) -> Self {
         Self { layer1, layer2 }
     }
+    fn debug(layer1: Box<dyn Component<I, M>>, layer2: Box<dyn Component<M, O>>) -> Self {
+        let debug_layer = Box::new(DebugLayer::<M>::new());
+        MergeLayers::create(layer1, debug_layer)
+            .connect_to(layer2)
+    }
     fn connect_to<const P: usize>(
         self,
         next_layer: Box<dyn Component<O, P>>,
     ) -> MergeLayers<I, O, P> {
         MergeLayers::create(Box::new(self), next_layer)
+    }
+    fn debug_connect<const P: usize>(
+        self,
+        next_layer: Box<dyn Component<O, P>>,
+    ) -> MergeLayers<I, O, P> {
+        let debug_layer = Box::new(DebugLayer::<O>::new());
+        self.connect_to(debug_layer)
+            .connect_to(next_layer)
     }
 }
 
@@ -51,7 +77,7 @@ where
             result
                 .iter_mut()
                 .zip(block.eval(val))
-                .map(|(v1, v2)| *v1 = v2);
+                .for_each(|(v1, v2)| *v1 = v2);
         }
         Self::merge_output(outputs)
     }
@@ -235,10 +261,12 @@ impl Component<2, 2> for RSFlipFlop {
         self.ff.eval(self.input_with_cache(input))
     }
     fn eval_recur(&mut self, input: [bool; 2]) -> [bool; 2] {
-        let result = self.ff.eval_recur(self.input_with_cache(input));
-        self.nand1_to_nand2_line_state = result[0];
-        self.nand2_to_rand1_line_state = result[1];
-        result
+        for _ in 0..8 {
+            let result = self.ff.eval_recur(self.input_with_cache(input));
+            self.nand1_to_nand2_line_state = result[0];
+            self.nand2_to_rand1_line_state = result[1];
+        }
+        self.eval(input)
     }
 }
 
@@ -268,6 +296,7 @@ impl RSFlipFlop {
     }
 }
 
+#[derive(Debug)]
 struct Wiring<const N: usize, const M: usize> {
     table: [usize; M],
 }
@@ -286,7 +315,7 @@ impl<const N: usize, const M: usize> Wiring<N, M> {
     }
 }
 impl<const N: usize, const M: usize> Wiring<N, M> {
-    // コンパイラには違う方に見えるけど実際は同じものをラップする
+    // コンパイラには違う型に見えるけど実際は同じものをラップする
     fn wrapper() -> Self {
         let mut table = [0; M];
         table.iter_mut().zip(0..N).for_each(|(t, n)| *t = n);
@@ -296,11 +325,12 @@ impl<const N: usize, const M: usize> Wiring<N, M> {
 impl<const N: usize> Wiring<N, N> {
     fn unzip<const S: usize>() -> Self {
         // [[usize; S]; sep] -> [[usize; sep];S]
+        // branchなどで固まっているものをばらす
         let mut table = [0; N];
         let sep = N / S;
-        for i in 0..sep {
-            for j in 0..S {
-                table[i * S + j] = j * sep + i;
+        for i in 0..S {
+            for j in 0..sep {
+                table[i * sep + j] = j * S + i;
             }
         }
         Self { table }
@@ -342,26 +372,36 @@ where
             [Branch::<2>::new(); N].map(|b| Box::new(b) as Box<dyn Component<1, 2>>),
         );
         let layer2 = Wiring::<{ 2 * N }, { 2 * N }>::unzip::<2>();
+
         let layer3: ConcatBlocks<{ 1 * N }, { 1 * N }, 2> = {
             let not = Box::new(ConcatBlocks::create(
                 [Not::new(); N].map(|n| Box::new(n) as Box<dyn Component<1, 1>>),
             )) as Box<dyn Component<{ 1 * N }, { 1 * N }>>;
+
             let buffer = Box::new(ConcatBlocks::create(
                 [Buffer::new(); N].map(|n| Box::new(n) as Box<dyn Component<1, 1>>),
             )) as Box<dyn Component<{ 1 * N }, { 1 * N }>>;
+
             ConcatBlocks::create([not, buffer])
         };
+        // layer3終了時点でnot 1, not 2, ..., not N, 1, 2, ..., N
+
         let layer4 = {
             let mut table = [0; N * pow2(N)];
+            // N本のinputからnotかbufferを選んでN本を構成する
+            // N本（Andの入力）を2^N組（N bitのすべてのパターン）つくる
             for i in 0..pow2(N) {
                 for j in 0..N {
-                    let not_or_buffer = if i & (1 << j) == 0 { 1 } else { 0 };
+                    // N * i + j番地を考える
+                    // iのj bit目が0であればnotのj番につなぐ
+                    let not_or_buffer = if i & (1 << j) == 0 { 0 } else { 1 };
                     let addr = N * i + j;
                     table[addr] = N * not_or_buffer + j;
                 }
             }
             Wiring::create(table)
         };
+
         let layer5 = ConcatBlocks::create(
             [And::<N>::new(); pow2(N)].map(|a| Box::new(a) as Box<dyn Component<N, 1>>),
         );
@@ -407,7 +447,7 @@ impl Component<3, 1> for MemoryCell {
 impl MemoryCell {
     fn new() -> Self {
         let cell: MergeLayers<2, 2, 1> = {
-            let layer1 = Wiring::<2, 4>::create([0, 1, 0, 1]);
+            let layer1 = Wiring::<2, 4>::create([1, 0, 1, 0]);
             let layer2 = ConcatBlocks::create(
                 [Box::new(Not::new()) as Box<dyn Component<1, 1>>,
                 Box::new(Buffer::new()) as Box<dyn Component<1, 1>>,
@@ -474,8 +514,10 @@ impl<const N: usize> MemoryByte<N> where
         let cells = ConcatBlocks::create(
             [0; N].map(|c| Box::new(MemoryCell::new()) as Box<dyn Component<3, 1>>)
         );
+
         let out_wrapper = Wiring::<{1 * N}, N>::wrapper();
         let cells = MergeLayers::create(Box::new(cells), Box::new(out_wrapper));
+
         let byte: MergeLayers<{N + 2}, {3 * N}, N> = MergeLayers::create(
             Box::new(layer1),
             Box::new(cells)
@@ -517,10 +559,10 @@ where
     [(); pow2(Address) * Bit]: Sized,
 {
     fn eval_recur(&mut self, input: [bool; Address + Bit + 2]) -> [bool; Bit] {
-        self.eval_recur(input)
+        self.memory.eval_recur(input)
     }
     fn eval(&self, input: [bool; Address + Bit + 2]) -> [bool; Bit] {
-        self.eval(input)
+        self.memory.eval(input)
     }
 }
 
@@ -597,13 +639,13 @@ impl<const Address: usize, const Bit: usize> Memory<Address, Bit> where
                     2 * pow2(Address) + p - 2
                 }
             });
-        let layer2 = Wiring::create(layer2_table);
+        let layer2 = Wiring::<{2 * pow2(Address) + 1 * Bit}, {(Bit + 2) * pow2(Address)}>::create(layer2_table);
         let bytes = ConcatBlocks::<{Bit + 2}, Bit, {pow2(Address)}>::create(
             [0; pow2(Address)].map(|_| {
                 Box::new(MemoryByte::new()) as Box<dyn Component<{Bit + 2}, Bit>>
             })
         );
-        let layer3 = Wiring::unzip::<Bit>();
+        let layer3 = Wiring::<{Bit * pow2(Address)}, {Bit * pow2(Address)}>::unzip::<Bit>();
         let layer34_wrapper = Wiring::<{Bit * pow2(Address)}, {pow2(Address) * Bit}>::wrapper();
         let layer4 = ConcatBlocks::create(
             [Or::<{pow2(Address)}>::new(); Bit].map(|c| {
@@ -613,7 +655,7 @@ impl<const Address: usize, const Bit: usize> Memory<Address, Bit> where
         let out_wrapper = Wiring::<{1 * Bit}, Bit>::wrapper();
         let layer4 = MergeLayers::create(Box::new(layer4), Box::new(out_wrapper));
 
-        let memory = MergeLayers::create(Box::new(in_wrapper), Box::new(layer1))
+        let mut memory = MergeLayers::create(Box::new(in_wrapper), Box::new(layer1))
             .connect_to(Box::new(layer2))
             .connect_to(Box::new(bytes))
             .connect_to(Box::new(layer3))
@@ -626,7 +668,7 @@ impl<const Address: usize, const Bit: usize> Memory<Address, Bit> where
 
 
 fn main() {
-    let memory = Memory::<8, 8>::new();
+    let mut memory = Memory::<8, 8>::new();
     let bit_to_num = |bits: [bool; 8]| -> usize {
         bits.iter().enumerate()
             .map(|(i, &b)| (1 << i) * if b {1} else {0})
@@ -641,7 +683,7 @@ fn main() {
     let create_input = |read: bool, write: bool, addr: usize, values: usize| -> [bool; 18] {
         let addr = num_to_bit(addr);
         let values = num_to_bit(values);
-        let result = [false; 18];
+        let mut result = [false; 18];
         result.iter_mut()
             .zip([read, write].into_iter()
                 .chain(addr.into_iter())
@@ -649,14 +691,35 @@ fn main() {
             .for_each(|(v1, v2)| *v1 = v2);
         result
     };
-    let read = |addr: usize| -> usize {
+    let read = |memory: &mut Memory<8, 8>, addr: usize| -> usize {
         let input = create_input(true, false, addr, 0);
         let result = memory.eval_recur(input);
         bit_to_num(result)
     };
-    let write = |addr: usize, val: usize| -> usize {
+    let write = |memory: &mut Memory<8, 8>, addr: usize, val: usize| -> usize {
         let input = create_input(true, true, addr, val);
-        let result = memory.eval_recur(input);
+        let result = memory.memory.eval_recur(input);
         bit_to_num(result)
     };
+    // println!("{:?}", write(&mut memory, 1, 1));
+    // for i in 0..255 {
+    //     write(&mut memory, i, i);
+    // }
+    // for i in 0..255 {
+    //     println!("{:?}", read(&mut memory, i));
+    // }
+    // let mut ff = MemoryByte::<8>::new();
+    // let rw_input = |n: usize| -> [bool; 10] {
+    //     let bits = num_to_bit(n);
+    //     let mut result = [false; 10];
+    //     for i in 0..8 {
+    //         result[i + 2] = bits[i];
+    //     }
+    //     result[0] = true;
+    //     result[1] = true;
+    //     result
+    // };
+    // println!("{:?}", bit_to_num(ff.eval_recur(rw_input(10))));
+    // let mut decoder = BitDecoder::<8>::new();
+    // println!("{:?}", decoder.eval_recur([true; 8]));
 }
