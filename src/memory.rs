@@ -117,6 +117,21 @@ impl MemoryCell {
     }
 }
 
+#[test]
+fn memory_cell_test() {
+    use crate::num_bit_converter::num_to_bit;
+
+    let mut cell = MemoryCell::new();
+    let mut state = cell.eval_mut([true, true, false])[0];
+    for i in 0..8 {
+        let input = num_to_bit::<3>(i);
+        if input[1] {
+            state = input[2];
+        }
+        assert_eq!(cell.eval_mut(input), [input[0] && state]);
+    }
+}
+
 pub struct MemoryByte<const N: usize> where
     [(); N + 2]: Sized,
     [(); 3 * N]: Sized,
@@ -181,6 +196,36 @@ macro_rules! ExistUntilx4 {
             [(); 2 * (2 * $N)],
         )
     };
+}
+
+#[test]
+fn memory_byte_test() {
+    use crate::num_bit_converter::*;
+
+    let mut byte = MemoryByte::<8>::new();
+    let read_flag = 1;
+    let write_flag = 2;
+    for i in 0..256 {
+        let num = 255 - i;
+        assert_eq!(
+            byte.eval_mut(num_to_bit::<10>((num << 2) + write_flag)),
+            [false; 8]
+        );
+        assert_eq!(
+            byte.eval_mut(num_to_bit::<10>(read_flag)),
+            num_to_bit(num)
+        );
+    }
+    for i in 0..256 {
+        assert_eq!(
+            byte.eval_mut(num_to_bit::<10>((i << 2) + write_flag + read_flag)),
+            num_to_bit::<8>(i)
+        );
+        assert_eq!(
+            byte.eval_mut(num_to_bit::<10>(read_flag)),
+            num_to_bit::<8>(i)
+        );
+    }
 }
 
 pub struct Memory<const Address: usize, const Bit: usize> where
@@ -305,5 +350,21 @@ impl<const Address: usize, const Bit: usize> Memory<Address, Bit> where
             .connect_to(Box::new(layer4));
 
         Self {memory}
+    }
+}
+
+#[test]
+fn memory_test() {
+    use crate::num_bit_converter::*;
+
+    let mut memory = Memory::<8, 8>::new();
+
+    for i in 0..256 {
+        let read = 1;
+        let write = 2;
+        let addr = i;
+        let num = 255 - i;
+        let input = num_to_bit::<18>((num << 10) + (addr << 2) + write + read);
+        assert_eq!(memory.eval_mut(input), num_to_bit(num));
     }
 }

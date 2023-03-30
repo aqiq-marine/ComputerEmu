@@ -1,13 +1,13 @@
 use crate::core::*;
 
 #[derive(Debug, Clone, Copy)]
-pub struct False<const I: usize, const O: usize> {}
-impl<const I: usize, const O: usize> Component<I, O> for False<I, O> {
+pub struct Constant<const I: usize, const O: usize, const D: bool> {}
+impl<const I: usize, const O: usize, const D: bool> Component<I, O> for Constant<I, O, D> {
     fn eval(&self, input: [bool; I]) -> [bool; O] {
-        [false; O]
+        [D; O]
     }
 }
-impl<const I: usize, const O: usize> False<I, O> {
+impl<const I: usize, const O: usize, const D: bool> Constant<I, O, D> {
     pub fn new() -> Self {
         Self {}
     }
@@ -16,9 +16,11 @@ impl<const I: usize, const O: usize> False<I, O> {
 #[test]
 fn false_test() {
     use crate::num_bit_converter::*;
-    let f = False::<8, 8>::new();
+    let f = Constant::<8, 8, false>::new();
+    let t = Constant::<8, 8, true>::new();
     for i in 0..256 {
-        assert_eq!(f.eval(num_to_bit::<8>(i)), [false; 8])
+        assert_eq!(f.eval(num_to_bit::<8>(i)), [false; 8]);
+        assert_eq!(t.eval(num_to_bit::<8>(i)), [true; 8]);
     }
 }
 
