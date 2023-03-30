@@ -5,7 +5,8 @@
 
 trait Component<const I: usize, const O: usize> {
     fn eval(&self, input: [bool; I]) -> [bool; O];
-    fn eval_recur(&mut self, input: [bool; I]) -> [bool; O] {
+    // メモリなどで内部状態を変更しながら評価する
+    fn eval_mut(&mut self, input: [bool; I]) -> [bool; O] {
         self.eval(input)
     }
 }
@@ -31,8 +32,8 @@ impl<const I: usize, const M: usize, const O: usize> Component<I, O> for MergeLa
     fn eval(&self, input: [bool; I]) -> [bool; O] {
         self.layer2.eval(self.layer1.eval(input))
     }
-    fn eval_recur(&mut self, input: [bool; I]) -> [bool; O] {
-        self.layer2.eval_recur(self.layer1.eval_recur(input))
+    fn eval_mut(&mut self, input: [bool; I]) -> [bool; O] {
+        self.layer2.eval_mut(self.layer1.eval_mut(input))
     }
 }
 impl<const I: usize, const M: usize, const O: usize> MergeLayers<I, M, O> {
@@ -70,13 +71,13 @@ where
     [(); I * N]: Sized,
     [(); O * N]: Sized,
 {
-    fn eval_recur(&mut self, input: [bool; I * N]) -> [bool; O * N] {
+    fn eval_mut(&mut self, input: [bool; I * N]) -> [bool; O * N] {
         let inputs = Self::split_input(input);
         let mut outputs = [[false; O]; N];
         for ((result, block), val) in outputs.iter_mut().zip(self.blocks.iter_mut()).zip(inputs) {
             result
                 .iter_mut()
-                .zip(block.eval_recur(val))
+                .zip(block.eval_mut(val))
                 .for_each(|(v1, v2)| *v1 = v2);
         }
         Self::merge_output(outputs)
@@ -132,10 +133,10 @@ impl<const I1: usize, const I2: usize, const O1: usize, const O2: usize>
         let output2 = self.block2.eval(input2);
         Self::merge_output(output1, output2)
     }
-    fn eval_recur(&mut self, input: [bool; I1 + I2]) -> [bool; O1 + O2] {
+    fn eval_mut(&mut self, input: [bool; I1 + I2]) -> [bool; O1 + O2] {
         let (input1, input2) = Self::split_input(input);
-        let output1 = self.block1.eval_recur(input1);
-        let output2 = self.block2.eval_recur(input2);
+        let output1 = self.block1.eval_mut(input1);
+        let output2 = self.block2.eval_mut(input2);
         Self::merge_output(output1, output2)
     }
 }
@@ -261,6 +262,35 @@ impl<const I: usize> NAND<I> {
     }
 }
 
+struct XOR<const I: usize> {
+    xor: MergeLayers<I, 2, 1>,
+}
+impl<const I: usize> Component<I, 1> for XOR<I> {
+    fn eval(&self, input: [bool; I]) -> [bool; 1] {
+        self.xor.eval(input)
+    }
+}
+impl<const I: usize> XOR<I> 
+where
+    [(); I * 2]: Sized,
+{
+    fn new() -> Self {
+        let mut layer1_table = [0; I * 2];
+        for (i, v) in layer1_table.iter_mut().enumerate() {
+            *v = i % I;
+        }
+        let layer1 = Wiring::create(layer1_table);
+        let layer2 = ConcatBlocks::create(
+            [Box::new(Or::<I>::new()), Box::new(NAND::<I>::new())]
+        );
+        let layer3 = And::<2>::new();
+        let xor = MergeLayers::<I, {I * 2}, 2>::create(Box::new(layer1), Box::new(layer2))
+            .connect_to(Box::new(layer3));
+        Self {
+            xor,
+        }
+    }
+}
 
 // Reset, Setの順
 struct RSFlipFlop {
@@ -273,9 +303,9 @@ impl Component<2, 2> for RSFlipFlop {
     fn eval(&self, input: [bool; 2]) -> [bool; 2] {
         self.ff.eval(self.input_with_cache(input))
     }
-    fn eval_recur(&mut self, input: [bool; 2]) -> [bool; 2] {
+    fn eval_mut(&mut self, input: [bool; 2]) -> [bool; 2] {
         for _ in 0..8 {
-            let result = self.ff.eval_recur(self.input_with_cache(input));
+            let result = self.ff.eval_mut(self.input_with_cache(input));
             self.nand1_to_nand2_line_state = result[0];
             self.nand2_to_rand1_line_state = result[1];
         }
@@ -339,8 +369,11 @@ impl<const N: usize, const M: usize> Wiring<N, M> {
     }
 }
 impl<const N: usize> Wiring<N, N> {
+    fn zip<const S: usize>() -> Self {
+        Self::unzip::<S>()
+    }
     fn unzip<const S: usize>() -> Self {
-        // [[usize; S]; sep] -> [[usize; sep];S]
+        // [[usize; S]; sep] -> [[usize; sep]; S]
         // branchなどで固まっているものをばらす
         let mut table = [0; N];
         let sep = N / S;
@@ -452,8 +485,8 @@ struct MemoryCell {
 }
 
 impl Component<3, 1> for MemoryCell {
-    fn eval_recur(&mut self, input: [bool; 3]) -> [bool; 1] {
-        self.cell.eval_recur(input)
+    fn eval_mut(&mut self, input: [bool; 3]) -> [bool; 1] {
+        self.cell.eval_mut(input)
     }
     fn eval(&self, input: [bool; 3]) -> [bool; 1] {
         self.cell.eval(input)
@@ -505,8 +538,8 @@ struct MemoryByte<const N: usize> where
 impl<const N: usize> Component<{N + 2}, N> for MemoryByte<N> where
     [(); 3 * N]: Sized,
 {
-    fn eval_recur(&mut self, input: [bool; N + 2]) -> [bool; N] {
-        self.byte.eval_recur(input)
+    fn eval_mut(&mut self, input: [bool; N + 2]) -> [bool; N] {
+        self.byte.eval_mut(input)
     }
     fn eval(&self, input: [bool; N + 2]) -> [bool; N] {
         self.byte.eval(input)
@@ -574,8 +607,8 @@ where
     [(); Address + Bit + 2]: Sized,
     [(); pow2(Address) * Bit]: Sized,
 {
-    fn eval_recur(&mut self, input: [bool; Address + Bit + 2]) -> [bool; Bit] {
-        self.memory.eval_recur(input)
+    fn eval_mut(&mut self, input: [bool; Address + Bit + 2]) -> [bool; Bit] {
+        self.memory.eval_mut(input)
     }
     fn eval(&self, input: [bool; Address + Bit + 2]) -> [bool; Bit] {
         self.memory.eval(input)
@@ -675,7 +708,7 @@ impl<const Address: usize, const Bit: usize> Memory<Address, Bit> where
         let out_wrapper = Wiring::<{1 * Bit}, Bit>::wrapper();
         let layer4 = MergeLayers::create(Box::new(layer4), Box::new(out_wrapper));
 
-        let mut memory = MergeLayers::create(Box::new(in_wrapper), Box::new(layer1))
+        let memory = MergeLayers::create(Box::new(in_wrapper), Box::new(layer1))
             .connect_to(Box::new(layer2))
             .connect_to(Box::new(bytes))
             .connect_to(Box::new(layer3))
@@ -685,6 +718,7 @@ impl<const Address: usize, const Bit: usize> Memory<Address, Bit> where
         Self {memory}
     }
 }
+
 
 struct HalfAdder {
     adder: MergeLayers<2, 4, 2>,
@@ -699,7 +733,8 @@ impl HalfAdder {
     fn new() -> Self {
         let layer1 = Wiring::create([0, 1, 0, 1]);
         let layer2 = ConcatBlocks::create(
-            [And::<2>::new(); 2].map(|a| Box::new(a) as Box<dyn Component<2, 1>>)
+            [Box::new(XOR::<2>::new()),
+            Box::new(And::<2>::new())]
         );
         let adder = MergeLayers::create(Box::new(layer1), Box::new(layer2));
         Self {adder}
@@ -736,9 +771,98 @@ impl FullAdder {
     }
 }
 
+struct RecurrentBlock<const S: usize, const I: usize, const O: usize, const N: usize>
+where
+    [(); S + I]: Sized,
+    [(); O + S]: Sized,
+{
+    blocks: [Box<dyn Component<{S + I}, {O + S}>>; N],
+}
+
+impl<
+    const S: usize,
+    const In: usize,
+    const Out: usize,
+    const N: usize,
+> Component<{S + In * N}, {Out * N + S}> for RecurrentBlock<S, In, Out, N>
+where
+    [(); S + In]: Sized,
+    [(); Out + S]: Sized,
+    [(); S + In * N]: Sized,
+    [(); Out * N + S]: Sized,
+{
+    fn eval(&self, input: [bool; S + In * N]) -> [bool; Out * N + S] {
+        let mut acc = input[..S].to_vec();
+        let mut result = [false; Out * N + S];
+        for (i, block) in self.blocks.iter().enumerate() {
+            let mut block_input = [false; S + In];
+            block_input.iter_mut()
+                .zip(acc.iter().chain(input[(S + i * In)..(S + (i + 1) * In)].iter()))
+                .for_each(|(v1, v2)| *v1 = *v2);
+
+            let block_output = block.eval(block_input);
+            for j in 0..Out {
+                result[Out * i + j] = block_output[j];
+            }
+            acc = block_output[Out..].to_vec();
+        }
+
+        for i in 0..S {
+            result[Out * N + i] = acc[i];
+        }
+
+        result
+    }
+}
+
+impl<const S: usize, const I: usize, const O: usize, const N: usize> RecurrentBlock<S, I, O, N>
+where
+    [(); S + I]: Sized,
+    [(); O + S]: Sized,
+    [(); S + I * N]: Sized,
+    [(); O * N + S]: Sized,
+{
+    fn create(blocks: [Box<dyn Component<{S + I}, {O + S}>>; N]) -> Self {
+        Self { blocks}
+    }
+    fn create_from_fn<T: Component<{S + I}, {O + S}> + Sized + 'static>(f: fn() -> T) -> Self {
+        Self {
+            blocks: [0; N].map(|_| Box::new(f()) as Box<dyn Component<{S+I}, {O+S}>>)
+        }
+    }
+}
+
+
+struct EightBitFullAdder {
+    adder: MergeLayers<16, 17, 9>,
+}
+impl Component<16, 9> for EightBitFullAdder {
+    fn eval(&self, input: [bool; 16]) -> [bool; 9] {
+        self.adder.eval(input)
+    }
+}
+impl EightBitFullAdder {
+    fn new() -> Self {
+        let mut layer1_table = [0; 17];
+        layer1_table.iter_mut().enumerate()
+            .for_each(|(i, v)| *v = i.max(1) - 1);
+        let layer1 = Wiring::create(layer1_table);
+        let layer2 = Wiring::<16, 16>::zip::<8>();
+        let layer2 = ConcatDifferentShapeBlocks::create(
+            Box::new(False::<1, 1>::new()), Box::new(layer2)
+        );
+        let eight_bit_adder = RecurrentBlock::<1, 2, 1, 8>::create_from_fn(FullAdder::new);
+        let adder = MergeLayers::create(Box::new(layer1), Box::new(layer2))
+            .connect_to(Box::new(eight_bit_adder));
+        Self {adder}
+    }
+}
+
 
 fn main() {
-    let mut memory = Memory::<8, 8>::new();
+    let mut adder = EightBitFullAdder::new();
+
+    let mut memory = Memory::<10, 8>::new();
     let bit_to_num = |bits: [bool; 8]| -> usize {
         bits.iter().enumerate()
             .map(|(i, &b)| (1 << i) * if b {1} else {0})
@@ -750,38 +874,67 @@ fn main() {
             .for_each(|(i, b)| *b = num & (1 << i) != 0);
         bits
     };
-    let create_input = |read: bool, write: bool, addr: usize, values: usize| -> [bool; 18] {
-        let addr = num_to_bit(addr);
-        let values = num_to_bit(values);
-        let mut result = [false; 18];
+    let make_input = |n1: usize, n2: usize| -> [bool; 16] {
+        let mut result = [false; 16];
         result.iter_mut()
-            .zip([read, write].into_iter()
-                .chain(addr.into_iter())
-                .chain(values.into_iter()))
-            .for_each(|(v1, v2)| *v1 = v2);
+            .zip(num_to_bit(n1).iter().chain(num_to_bit(n2).iter()))
+            .for_each(|(v1, v2)| *v1 = *v2);
         result
     };
-    let read = |memory: &mut Memory<8, 8>, addr: usize| -> usize {
-        let input = create_input(true, false, addr, 0);
-        let result = memory.eval_recur(input);
-        bit_to_num(result)
+    let add = |adder: &mut EightBitFullAdder, n1: usize, n2: usize| -> usize {
+        let input = make_input(n1, n2);
+        let output = adder.eval(input);
+        let mut floor_output = [false; 8];
+        floor_output.iter_mut()
+            .zip(output.iter())
+            .for_each(|(v1, v2)| *v1 = *v2);
+        bit_to_num(floor_output)
     };
-    let write = |memory: &mut Memory<8, 8>, addr: usize, val: usize| -> usize {
-        let input = create_input(true, true, addr, val);
-        let result = memory.memory.eval_recur(input);
-        bit_to_num(result)
-    };
+    println!("{:?}", add(&mut adder, 2, 1));
+    (0..256).for_each(|i| {
+        (0..256).for_each(|j| {
+            assert_eq!(add(&mut adder, i, j), (i + j) % 256)
+        })
+    });
+
+    // let adder = FullAdder::new();
+    // println!("{:?}", adder.eval([false, false, false]));
+
+    // let adder = HalfAdder::new();
+    // println!("{:?}", adder.eval([true, true]));
+
+    // let create_input = |read: bool, write: bool, addr: usize, values: usize| -> [bool; 18] {
+    //     let addr = num_to_bit(addr);
+    //     let values = num_to_bit(values);
+    //     let mut result = [false; 18];
+    //     result.iter_mut()
+    //         .zip([read, write].into_iter()
+    //             .chain(addr.into_iter())
+    //             .chain(values.into_iter()))
+    //         .for_each(|(v1, v2)| *v1 = v2);
+    //     result
+    // };
+    // let read = |memory: &mut Memory<8, 8>, addr: usize| -> usize {
+    //     let input = create_input(true, false, addr, 0);
+    //     let result = memory.eval_mut(input);
+    //     bit_to_num(result)
+    // };
+    // let write = |memory: &mut Memory<8, 8>, addr: usize, val: usize| -> usize {
+    //     let input = create_input(true, true, addr, val);
+    //     let result = memory.memory.eval_mut(input);
+    //     bit_to_num(result)
+    // };
 
     // println!("{:?}", write(&mut memory, 1, 1));
-    for i in 0..128 {
-        write(&mut memory, i, i);
-    }
-    for i in 128..256 {
-        write(&mut memory, i, 0);
-    }
-    for i in 0..256 {
-        println!("{:?}", read(&mut memory, i));
-    }
+    // for i in 0..128 {
+    //     write(&mut memory, i, i);
+    // }
+    // for i in 128..256 {
+    //     write(&mut memory, i, 0);
+    // }
+    // for i in 0..256 {
+    //     println!("{:?}", read(&mut memory, i));
+    // }
 
     // let mut ff = RSFlipFlop::new();
     // println!("{:?}", ff.eval_recur([false, true]));
