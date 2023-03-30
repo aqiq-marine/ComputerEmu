@@ -13,6 +13,16 @@ impl<const I: usize, const O: usize> False<I, O> {
     }
 }
 
+#[test]
+fn false_test() {
+    use crate::num_bit_converter::*;
+    let f = False::<8, 8>::new();
+    for i in 0..256 {
+        assert_eq!(f.eval(num_to_bit::<8>(i)), [false; 8])
+    }
+}
+
+
 #[derive(Debug, Clone, Copy)]
 pub struct And<const I: usize> {}
 impl<const I: usize> Component<I, 1> for And<I> {
@@ -26,6 +36,16 @@ impl<const I: usize> And<I> {
     }
 }
 
+#[test]
+fn and_test() {
+    use crate::num_bit_converter::*;
+    let c = And::<8>::new();
+    for i in 0..255 {
+        assert_eq!(c.eval(num_to_bit::<8>(i)), [false]);
+    }
+    assert_eq!(c.eval([true; 8]), [true]);
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Or<const I: usize> {}
 
@@ -37,6 +57,16 @@ impl<const I: usize> Component<I, 1> for Or<I> {
 impl<const I: usize> Or<I> {
     pub fn new() -> Self {
         Self {}
+    }
+}
+
+#[test]
+fn or_test() {
+    use crate::num_bit_converter::*;
+    let c = Or::<8>::new();
+    assert_eq!(c.eval([false; 8]), [false]);
+    for i in 1..256 {
+        assert_eq!(c.eval(num_to_bit::<8>(i)), [true]);
     }
 }
 
@@ -54,6 +84,13 @@ impl Not {
     }
 }
 
+#[test]
+fn not_test() {
+    let c = Not::new();
+    assert_eq!(c.eval([true]), [false]);
+    assert_eq!(c.eval([false]), [true]);
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Buffer {}
 
@@ -66,6 +103,13 @@ impl Buffer {
     pub fn new() -> Self {
         Self {}
     }
+}
+
+#[test]
+fn buffer_test() {
+    let c = Buffer::new();
+    assert_eq!(c.eval([true]), [true]);
+    assert_eq!(c.eval([false]), [false]);
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -82,6 +126,13 @@ impl<const O: usize> Branch<O> {
     }
 }
 
+#[test]
+fn branch_test() {
+    let c = Branch::<8>::new();
+    assert_eq!(c.eval([true]), [true; 8]);
+    assert_eq!(c.eval([false]), [false; 8]);
+}
+
 pub struct NAND<const I: usize> {
     nand: MergeLayers<I, 1, 1>,
 }
@@ -96,6 +147,16 @@ impl<const I: usize> NAND<I> {
             nand: MergeLayers::create(Box::new(And::<I>::new()), Box::new(Not::new())),
         }
     }
+}
+
+#[test]
+fn nand_test() {
+    use crate::num_bit_converter::*;
+    let c = NAND::<8>::new();
+    for i in 0..255 {
+        assert_eq!(c.eval(num_to_bit::<8>(i)), [true]);
+    }
+    assert_eq!(c.eval([true; 8]), [false]);
 }
 
 pub struct XOR<const I: usize> {
@@ -126,4 +187,15 @@ where
             xor,
         }
     }
+}
+
+#[test]
+fn xor_test() {
+    use crate::num_bit_converter::*;
+    let c = XOR::<8>::new();
+    assert_eq!(c.eval([false; 8]), [false]);
+    for i in 1..255 {
+        assert_eq!(c.eval(num_to_bit::<8>(i)), [true]);
+    }
+    assert_eq!(c.eval([true; 8]), [false]);
 }

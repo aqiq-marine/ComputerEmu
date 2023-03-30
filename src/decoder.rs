@@ -90,3 +90,17 @@ where
         Self { decoder }
     }
 }
+
+#[test]
+fn decoder_test() {
+    use crate::num_bit_converter::*;
+    let decoder = BitDecoder::<8>::new();
+    for i in 0..256 {
+        let expected_output = {
+            let mut ex = [false; 256];
+            ex[i] = true;
+            ex
+        };
+        assert_eq!(decoder.eval(num_to_bit::<8>(i)), expected_output);
+    }
+}

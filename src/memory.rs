@@ -52,6 +52,22 @@ impl RSFlipFlop {
     }
 }
 
+#[test]
+fn rsflipflop_test() {
+    let mut ff = RSFlipFlop::new();
+
+    // 内部状態: [false, false]
+    assert_eq!(ff.eval_mut([true, false]), [false, true]);
+    // [false, true]
+    assert_eq!(ff.eval_mut([true, false]), [false, true]);
+    assert_eq!(ff.eval_mut([false, false]), [false, true]);
+    assert_eq!(ff.eval_mut([false, true]), [true, false]);
+    // [true, false]
+    assert_eq!(ff.eval_mut([false, false]), [true, false]);
+    assert_eq!(ff.eval_mut([false, true]), [true, false]);
+    assert_eq!(ff.eval_mut([true, false]), [false, true]);
+}
+
 
 struct MemoryCell {
     cell: MergeLayers<3, 2, 1>,

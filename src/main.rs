@@ -8,6 +8,7 @@ use crate::memory::*;
 mod decoder;
 mod calculator;
 use crate::calculator::*;
+mod num_bit_converter;
 
 fn main() {
     let mut adder = EightBitFullAdder::new();
