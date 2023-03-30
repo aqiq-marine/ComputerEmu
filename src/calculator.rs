@@ -233,3 +233,84 @@ fn comparator_test() {
     assert_eq!(comp.eval([false, true]), [false, false, true]);
     assert_eq!(comp.eval([true, true]), [false, true, false]);
 }
+
+struct EightBitComparator {
+    comp: MergeLayers<19, 19, 3>,
+}
+
+impl Component<19, 3> for EightBitComparator {
+    fn eval(&self, input: [bool; 19]) -> [bool; 3] {
+        self.comp.eval(input)
+    }
+}
+
+impl EightBitComparator {
+    fn new() -> Self {
+        let make_comp = || {
+            let if_eq = {
+                let layer1 = Wiring::<4, 6>::create([0, 1, 0, 2, 0, 3]);
+                let layer2 = ConcatBlocks::create(
+                    [And::<2>::new(); 3].map(|c| Box::new(c) as Box<dyn Component<2, 1>>)
+                );
+                MergeLayers::create(Box::new(layer1), Box::new(layer2))
+            };
+
+            let cur_bit_comp = Comparator::new();
+            let recur_bit = ConcatBlocks::create(
+                [Buffer::new(); 3].map(|c| Box::new(c) as Box<dyn Component<1, 1>>)
+            );
+
+            let layer1 = ConcatDifferentShapeBlocks::create(
+                Box::new(recur_bit),
+                Box::new(cur_bit_comp)
+            );
+            let layer2 = Wiring::<6, 6>::create([3, 4, 0, 1, 2, 5]);
+            let layer3 = ConcatDifferentShapeBlocks::create(
+                Box::new(Buffer::new()),
+                Box::new(if_eq),
+            );
+            let layer3 = ConcatDifferentShapeBlocks::create(
+                Box::new(layer3),
+                Box::new(Buffer::new()),
+            );
+            let layer4 = ConcatDifferentShapeBlocks::create(
+                Box::new(Or::<2>::new()),
+                Box::new(Buffer::new()),
+            );
+            let layer4 = ConcatDifferentShapeBlocks::create(
+                Box::new(layer4),
+                Box::new(Or::<2>::new())
+            );
+
+            MergeLayers::create(Box::new(layer1), Box::new(layer2))
+                .connect_to(Box::new(layer3))
+                .connect_to(Box::new(layer4))
+        };
+
+        let comp_core = RecurrentBlock::<3, 2, 0, 8>::create_from_fn(make_comp);
+        let zip_data = Wiring::<16, 16>::zip::<8>();
+        let prev_input = ConcatBlocks::create(
+            [Buffer::new(); 3].map(|c| Box::new(c) as Box<dyn Component<1, 1>>)
+        );
+        let layer1 = ConcatDifferentShapeBlocks::create(
+            Box::new(prev_input),
+            Box::new(zip_data)
+        );
+        let comp = MergeLayers::create(Box::new(layer1), Box::new(comp_core));
+
+        Self { comp}
+    }
+}
+
+#[test]
+fn eight_bit_comparator_test() {
+    use crate::num_bit_converter::*;
+    let comp = EightBitComparator::new();
+    for i in 0..256 {
+        for j in 0..256 {
+            let default = 2;
+            let input = num_to_bit((((j << 8) + i) << 3) + default);
+            assert_eq!(comp.eval(input), [i > j, i == j, i < j]);
+        }
+    }
+}
