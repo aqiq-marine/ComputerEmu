@@ -93,6 +93,13 @@ impl<const I: usize, const O: usize, const N: usize> ConcatBlocks<I, O, N> {
     pub fn create(blocks: [Box<dyn Component<I, O>>; N]) -> Self {
         Self { blocks }
     }
+    pub fn create_from_fn<T>(f: fn() -> T) -> Self
+    where
+        T: Component<I, O> + Sized + 'static
+    {
+        let blocks = [0; N].map(|_| Box::new(f()) as Box<dyn Component<I, O>>);
+        Self { blocks }
+    }
     fn split_input(input: [bool; I * N]) -> [[bool; I]; N] {
         let mut inputs = [[false; I]; N];
         for (v1, v2) in inputs.iter_mut().flatten().zip(input) {
@@ -201,6 +208,30 @@ impl<const N: usize> Wiring<N, N> {
             }
         }
         Self { table }
+    }
+    pub fn zip_with_chunk<const S: usize>() -> Self {
+        let mut table = [0; N];
+        table.iter_mut().enumerate()
+            .for_each(|(i, v)| {
+                let chunk_index = i / (2 * S);
+                let index_in_chunk = i % S;
+                let is_in_block0 = i % (2 * S) < S;
+                *v = chunk_index * S + index_in_chunk + if is_in_block0 {0} else {N / 2};
+            });
+        Self {table}
+    }
+    pub fn rotate_right<const S: usize>() -> Self {
+        let mut table = [0; N];
+        for (i, v) in table.iter_mut().enumerate() {
+            *v = (i + N - S) % N;
+        }
+        Self {table}
+    }
+    pub fn reverse() -> Self {
+        let mut table = [0; N];
+        table.iter_mut().enumerate()
+            .for_each(|(i, v)| *v = N - i - 1);
+        Self {table}
     }
 }
 

@@ -6,6 +6,7 @@ mod memory;
 mod decoder;
 mod calculator;
 mod num_bit_converter;
+mod cpu;
 
 fn main() {
 }
