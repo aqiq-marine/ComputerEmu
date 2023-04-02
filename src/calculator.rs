@@ -174,9 +174,11 @@ fn nbyte_adder_test() {
     let adder = NByteAdder::<2>::new();
     for i in 0..256 {
         for j in 0..256 {
+            let i = (i << 8) + i;
+            let j = (j << 8) + j;
             assert_eq!(
                 bit_to_num(adder.eval(num_to_bit((i << 16) + j))),
-                i + j
+                (i + j) % (1 << 16)
             );
         }
     }
@@ -463,24 +465,20 @@ impl EightBitMultiplier {
     }
 }
 
-// #[test]
-// fn eight_bit_multiplier_test() {
-//     use crate::num_bit_converter::*;
-// 
-//     let mul = EightBitMultiplier::new();
-//     let i = 1;
-//     let j = 255;
-//     let input = num_to_bit((i << 8) + j);
-//     assert_eq!(bit_to_num(mul.eval(input)), i * j);
-// 
-//     // for i in 0..256 {
-//     //     for j in 0..256 {
-//     //         let input = num_to_bit((i << 8) + j);
-//     //         assert_eq!(bit_to_num(mul.eval(input)), i * j);
-//     //         assert_eq!(
-//     //             EightBitMultiplier::dummy(i, j),
-//     //             i * j
-//     //         );
-//     //     }
-//     // }
-// }
+#[test]
+fn eight_bit_multiplier_test() {
+    use crate::num_bit_converter::*;
+
+    let mul = EightBitMultiplier::new();
+
+    for i in 0..256 {
+        for j in 0..256 {
+            let input = num_to_bit((i << 8) + j);
+            assert_eq!(bit_to_num(mul.eval(input)), i * j);
+            assert_eq!(
+                EightBitMultiplier::dummy(i, j),
+                i * j
+            );
+        }
+    }
+}
