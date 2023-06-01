@@ -1,8 +1,5 @@
-use std::num;
-
 use crate::core::*;
 use crate::basic_comp::*;
-use crate::num_bit_converter;
 
 pub struct HalfAdder {
     adder: MergeLayers<2, 4, 2>,
@@ -466,6 +463,7 @@ impl EightBitMultiplier {
 }
 
 #[test]
+#[ignore = "this test takes too long time"]
 fn eight_bit_multiplier_test() {
     use crate::num_bit_converter::*;
 

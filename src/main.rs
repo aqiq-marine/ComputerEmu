@@ -4,9 +4,10 @@ mod core;
 mod basic_comp;
 mod memory;
 mod decoder;
-mod calculator;
+mod arithmetic_comp;
 mod num_bit_converter;
-mod cpu;
+mod clock;
+mod computer;
 
 fn main() {
 }

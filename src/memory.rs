@@ -69,7 +69,8 @@ fn rsflipflop_test() {
 }
 
 
-struct MemoryCell {
+pub struct MemoryCell {
+    // read, write, value
     cell: MergeLayers<3, 2, 1>,
 }
 
@@ -83,7 +84,7 @@ impl Component<3, 1> for MemoryCell {
 }
 
 impl MemoryCell {
-    fn new() -> Self {
+    pub fn new() -> Self {
         let cell: MergeLayers<2, 2, 1> = {
             let layer1 = Wiring::<2, 4>::create([0, 1, 0, 1]);
             let layer2 = ConcatBlocks::create(
@@ -112,7 +113,11 @@ impl MemoryCell {
             Box::new(Buffer::new()),
             Box::new(cell)
         );
-        let cell = MergeLayers::create(Box::new(cell), Box::new(read_select));
+        let mut cell = MergeLayers::create(Box::new(cell), Box::new(read_select));
+        // 初期化
+        for i in 0..5 {
+            cell.eval_mut([false, true, false]);
+        }
         Self {cell}
     }
 }
@@ -130,6 +135,9 @@ fn memory_cell_test() {
         }
         assert_eq!(cell.eval_mut(input), [input[0] && state]);
     }
+
+    assert_eq!(cell.eval_mut([true, true, true]), [true]);
+    assert_eq!(cell.eval_mut([true, false, false]), [true]);
 }
 
 pub struct MemoryByte<const N: usize> where

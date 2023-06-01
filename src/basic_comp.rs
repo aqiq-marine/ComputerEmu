@@ -201,3 +201,55 @@ fn xor_test() {
     }
     assert_eq!(c.eval([true; 8]), [false]);
 }
+
+pub struct Adapter<const P: usize, const N: usize>
+where
+    [(); N * P]: Sized
+{
+    adapter: MergeLayers<{N * P}, {N * P}, P>,
+}
+
+impl<const P: usize, const N: usize> Component<{N * P}, P> for Adapter<P, N>
+where
+    [(); N * P]: Sized
+{
+    fn eval(&self, input: [bool; N * P]) -> [bool; P] {
+        self.adapter.eval(input)
+    }
+}
+
+impl <const P: usize, const N: usize> Adapter<P, N>
+where
+    [(); 1 * P]: Sized,
+    [(); N * P]: Sized
+{
+    fn new() -> Self {
+        let zipper = Wiring::<{N * P}, {N * P}>::zip::<P>();
+        let or = ConcatBlocks::<N, 1, P>::create_from_fn(Or::<N>::new);
+        let wrapper = Wiring::<{1 * P}, P>::wrapper();
+        let or = MergeLayers::create(Box::new(or), Box::new(wrapper));
+        let adapter = MergeLayers::create(
+            Box::new(zipper),
+            Box::new(or)
+        );
+
+        Self {adapter}
+    }
+}
+
+#[test]
+fn adapter_test() {
+    use crate::num_bit_converter::*;
+    let adapter = Adapter::<8, 4>::new();
+    for i in 0..4 {
+        for j in 0..(1 << 8) {
+            let input = num_to_bit(j << (i * 8));
+            assert_eq!(bit_to_num(adapter.eval(input)), j);
+        }
+    }
+}
+
+
+
+
+

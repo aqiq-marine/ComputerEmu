@@ -192,8 +192,18 @@ impl<const N: usize, const M: usize> Wiring<N, M> {
         table.iter_mut().zip(0..N).for_each(|(t, n)| *t = n);
         Self { table }
     }
+    pub fn cut() -> Self {
+        Self::wrapper()
+    }
 }
 impl<const N: usize> Wiring<N, N> {
+    pub fn buffer() -> Self {
+        let mut table = [0; N];
+        table.iter_mut().enumerate()
+            .for_each(|(i, v)| *v = i);
+        Self { table }
+    }
+
     pub fn zip<const S: usize>() -> Self {
         Self::unzip::<S>()
     }
@@ -265,6 +275,29 @@ where
                 .for_each(|(v1, v2)| *v1 = *v2);
 
             let block_output = block.eval(block_input);
+            for j in 0..Out {
+                result[Out * i + j] = block_output[j];
+            }
+            acc = block_output[Out..].to_vec();
+        }
+
+        for i in 0..S {
+            result[Out * N + i] = acc[i];
+        }
+
+        result
+    }
+
+    fn eval_mut(&mut self, input: [bool; S + In * N]) -> [bool; Out * N + S] {
+        let mut acc = input[..S].to_vec();
+        let mut result = [false; Out * N + S];
+        for (i, block) in self.blocks.iter_mut().enumerate() {
+            let mut block_input = [false; S + In];
+            block_input.iter_mut()
+                .zip(acc.iter().chain(input[(S + i * In)..(S + (i + 1) * In)].iter()))
+                .for_each(|(v1, v2)| *v1 = *v2);
+
+            let block_output = block.eval_mut(block_input);
             for j in 0..Out {
                 result[Out * i + j] = block_output[j];
             }
